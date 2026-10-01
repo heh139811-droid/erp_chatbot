@@ -1,0 +1,10 @@
+{
+  "name": "@erp-chatbot/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --noEmit --project tsconfig.build.json"
+  }
+}
+
