@@ -1,0 +1,30 @@
+{
+  "name": "erp-chatbot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env.local --import tsx apps/api/src/server.ts",
+    "dev:web": "npm run dev --workspace @erp-chatbot/web",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "node --import tsx tests/run.ts",
+    "db:migrate": "node --env-file-if-exists=.env.local --import tsx apps/api/src/migrate.ts",
+    "db:cleanup": "node --env-file-if-exists=.env.local --import tsx apps/api/src/cleanup.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@fastify/cors": "^11.1.0",
+    "fastify": "^5.6.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
