@@ -36,7 +36,7 @@ export function MessageComposer({ disabled, onSend }: Props) {
     if (!event.nativeEvent.isComposing) void submit();
   };
   return (
-    <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-2 md:px-6 md:pb-5">
+    <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-6 pt-2 md:px-6 md:pb-8">
       <div className="mx-auto max-w-3xl">
         <Card className="flex-row items-end gap-2 rounded-2xl p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring/30">
           <Textarea
@@ -60,7 +60,6 @@ export function MessageComposer({ disabled, onSend }: Props) {
             <TooltipContent>전송 · Enter</TooltipContent>
           </Tooltip>
         </Card>
-        <p className="mt-2 text-center text-[11px] text-muted-foreground">AI 응답은 실제 ERP 데이터와 다를 수 있으므로 중요한 내용은 확인해 주세요.</p>
       </div>
     </div>
   );
