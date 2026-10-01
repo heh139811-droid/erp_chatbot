@@ -19,7 +19,7 @@ interface Props {
   onLoadMore: () => void;
   onSearch: (query: string) => void;
   onSelect: (threadId: string) => void;
-  onArchive: (threadId: string) => void;
+  onDelete: (threadId: string) => Promise<void>;
 }
 
 export function ConversationSidebar(props: Props) {
@@ -60,8 +60,10 @@ export function ConversationSidebar(props: Props) {
         <Search className="pointer-events-none absolute left-5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-8" placeholder="내 대화 검색" aria-label="내 대화 검색" />
       </div>
-      <ScrollArea className="min-h-0 flex-1 px-2">
-        <ConversationList threads={query.trim() ? props.searchResults : props.threads} selectedThreadId={props.selectedThreadId} onSelect={props.onSelect} onArchive={props.onArchive} />
+      <ScrollArea className="min-h-0 min-w-0 flex-1 px-2">
+        <div className="w-full min-w-0 overflow-hidden">
+          <ConversationList threads={query.trim() ? props.searchResults : props.threads} selectedThreadId={props.selectedThreadId} onSelect={props.onSelect} onDelete={props.onDelete} />
+        </div>
         {props.searching ? <div className="p-2"><Skeleton className="h-10 w-full" /></div> : null}
         {props.loading ? (
           <div className="space-y-2 p-2" aria-label="대화 목록 불러오는 중">

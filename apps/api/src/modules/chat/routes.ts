@@ -61,6 +61,14 @@ export function registerChatRoutes(app: FastifyInstance, dependencies: {
     return thread;
   });
 
+  app.delete('/api/chat/threads/:threadId', async (request, reply) => {
+    const userId = resolveUserId(request, config.devUserId);
+    const { threadId } = threadParams.parse(request.params);
+    const deleted = await repository.deleteThread(userId, threadId);
+    if (!deleted) throw Object.assign(new Error('Thread not found'), { statusCode: 404, code: 'THREAD_NOT_FOUND' });
+    return reply.code(204).send();
+  });
+
   app.post('/api/chat/threads/:threadId/messages', async (request, reply) => {
     const userId = resolveUserId(request, config.devUserId);
     const { threadId } = threadParams.parse(request.params);

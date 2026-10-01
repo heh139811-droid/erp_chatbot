@@ -14,7 +14,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export function createThread(): Promise<ChatThread> {
-  return requestJson('/api/chat/threads', { method: 'POST' });
+  return requestJson('/api/chat/threads', { method: 'POST', body: '{}' });
 }
 
 export function listThreads(input: { cursor?: string; status?: ThreadStatus; limit?: number } = {}): Promise<CursorPage<ChatThread>> {
@@ -37,6 +37,16 @@ export async function searchThreads(query: string): Promise<ConversationSearchRe
 
 export function archiveThread(threadId: string): Promise<ChatThread> {
   return requestJson(`/api/chat/threads/${threadId}`, { method: 'PATCH', body: JSON.stringify({ status: 'archived' }) });
+}
+
+export async function deleteThread(threadId: string): Promise<void> {
+  const response = await fetch(`/api/chat/threads/${threadId}`, {
+    method: 'DELETE'
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: '대화를 삭제하지 못했습니다.' })) as { message?: string };
+    throw new Error(error.message ?? '대화를 삭제하지 못했습니다.');
+  }
 }
 
 export async function* sendMessage(threadId: string, content: string, signal: AbortSignal): AsyncGenerator<StreamEvent> {
