@@ -8,9 +8,10 @@ ERP 챗봇 1차 초안입니다. 현재 저장소에서 독립 실행한 뒤 `wj
 
 ```bash
 npm install
-npm run dev
-npm run dev:web
+npm run start:all
 ```
+
+API와 Web 개발 서버를 한 번에 띄우고, `Ctrl+C`로 끄거나 한쪽이 종료되면 나머지도 함께 종료됩니다. 개별 실행이 필요하면 `npm run dev`(API), `npm run dev:web`(Web)을 쓸 수 있습니다.
 
 - API: `http://127.0.0.1:3000`
 - Web: `http://127.0.0.1:5173`
