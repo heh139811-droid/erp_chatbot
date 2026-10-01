@@ -26,14 +26,40 @@ export const SYSTEM_PROMPT = [...BASE_RULES, NO_TOOL_RULE].join('\n');
  * Builds the model's system instructions. With tools registered it also carries the
  * tool catalogue and the call protocol, matching steps 1-2 of FR-10 in the spec.
  */
-export function buildSystemPrompt(tools: ToolSpec[] = [], now: Date = new Date()): string {
+/** Instructions for the extra model call that closes a 50 question segment. */
+export const SUMMARY_SYSTEM_PROMPT = [
+  '당신은 사내 ERP 챗봇의 대화 요약기다.',
+  '아래 대화는 질문 50회로 한도에 닿아 끝나는 구간이다. 이어지는 다음 구간에서 대화를 계속하는 데 필요한 내용만 요약한다.',
+  '다음을 반드시 담는다. 지금 다루던 작업 대상(고객·계약·티켓 등 이름과 식별자), 확정된 결론과 수치, 아직 끝나지 않은 요청이나 사용자가 기다리는 것.',
+  '인사말, 중복된 설명, 모델이 안내한 일반 절차는 넣지 않는다.',
+  '확인되지 않은 내용을 추측해서 채우지 않는다. 대화에 나온 사실만 적는다.',
+  '한국어 평문으로 1200자 이내로 쓴다. 다른 말이나 머리말 없이 요약문만 출력한다.'
+].join('\n');
+
+export function buildSummaryRequest(messages: ChatMessage[]): ModelMessage[] {
+  const transcript = messages
+    .map((message) => `${message.role === 'user' ? '사용자' : '도우미'}: ${message.content}`)
+    .join('\n\n');
+  return [{ role: 'user', content: `${transcript}\n\n---\n위 대화를 다음 구간에 인계할 요약으로 정리하라.` }];
+}
+
+export function buildSystemPrompt(tools: ToolSpec[] = [], now: Date = new Date(), handoffSummary?: string | null): string {
   // 상대 날짜("어제", "저번 주")를 해석하려면 오늘이 며칠인지 알아야 한다.
   // 서버 로컬 시각을 쓰므로 DB 의 now() 와 같은 기준이다.
   const today = `오늘은 ${formatToday(now)}이다. "어제", "지난주" 같은 표현은 이 날짜를 기준으로 계산한다.`;
-  if (tools.length === 0) return [...BASE_RULES, NO_TOOL_RULE, today].join('\n');
+  const handoff = handoffSummary?.trim()
+    ? [
+        '',
+        '[이전 대화 요약]',
+        '같은 대화의 앞 구간이 질문 50회 한도로 끝나면서 넘어온 요약이다. 사용자가 "아까", "방금 말한" 처럼 가리키면 이 내용을 먼저 본다. 여기 없는 내용은 지어내지 않는다.',
+        handoffSummary.trim()
+      ]
+    : [];
+  if (tools.length === 0) return [...BASE_RULES, NO_TOOL_RULE, today, ...handoff].join('\n');
   return [
     ...BASE_RULES,
     today,
+    ...handoff,
     '업무 사실은 추측하지 않는다. 사내 데이터가 필요하면 아래 도구로 직접 조회해서 확인한 내용만 답한다.',
     '',
     '[도구 사용 규칙]',

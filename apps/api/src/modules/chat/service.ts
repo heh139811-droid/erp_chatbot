@@ -1,5 +1,7 @@
 import {
+  SUMMARY_SYSTEM_PROMPT,
   buildModelMessages,
+  buildSummaryRequest,
   buildSystemPrompt,
   mayBecomeToolCall,
   parseToolCall,
@@ -8,7 +10,7 @@ import {
 } from './context.js';
 import { ChatRepository } from './repository.js';
 import { ToolRegistry, type ToolContext } from './tool-registry.js';
-import type { ChatModelProvider, ModelMessage, NewAnswerBasis, ProviderResult, StreamEvent } from './types.js';
+import type { ChatMessage, ChatModelProvider, ModelMessage, NewAnswerBasis, ProviderResult, StreamEvent } from './types.js';
 
 /** How many tool hops one question may take before the model must answer with what it has. */
 const MAX_TOOL_ITERATIONS = 6;
@@ -29,12 +31,12 @@ export class ChatService {
   }): AsyncGenerator<StreamEvent> {
     const thread = await this.repository.getThread(input.ownerUserId, input.threadId);
     if (!thread) throw notFound();
-    const segment = await this.repository.getOrCreateSegment(thread.id);
+    const segment = await this.repository.getOrCreateSegment(thread.id, (messages) => this.summarizeSegment(messages, input.signal));
     const history = await this.repository.getRecentContext(thread.id, segment.id, this.contextMaxTokens);
     const runId = await this.repository.reserveRun(thread.id, segment.id, this.provider.name, this.provider.model);
     yield { type: 'run_started', run_id: runId };
 
-    const systemPrompt = buildSystemPrompt(this.tools.specs());
+    const systemPrompt = buildSystemPrompt(this.tools.specs(), new Date(), segment.handoff_summary);
     const conversation = buildModelMessages(history, input.question);
     const answerBasis: NewAnswerBasis[] = [];
 
@@ -124,6 +126,33 @@ export class ChatService {
       await this.repository.failRun(runId, 'PROVIDER_ERROR');
       await this.repository.deleteThreadIfEmpty(input.ownerUserId, thread.id);
       yield { type: 'error', run_id: runId, code: 'PROVIDER_ERROR', message: '현재 답변을 생성할 수 없습니다.' };
+    }
+  }
+
+  /**
+   * Condenses a segment that hit the 50 question limit so the next one can keep going.
+   * Never blocks the user's question: a failure here just means no handoff text.
+   */
+  private async summarizeSegment(messages: ChatMessage[], signal: AbortSignal): Promise<string | null> {
+    if (messages.length === 0) return null;
+    try {
+      const stream = this.provider.stream(buildSummaryRequest(messages), signal, SUMMARY_SYSTEM_PROMPT);
+      let summary = '';
+      while (true) {
+        const next = await stream.next();
+        if (next.done) break;
+        summary += next.value;
+      }
+      return summary.trim() || null;
+    } catch (error) {
+      if (signal.aborted) return null;
+      console.error(JSON.stringify({
+        event: 'chat_handoff_summary_failed',
+        provider: this.provider.name,
+        model: this.provider.model,
+        message: error instanceof Error ? error.message : String(error)
+      }));
+      return null;
     }
   }
 

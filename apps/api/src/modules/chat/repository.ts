@@ -6,6 +6,9 @@ import type { ChatMessage, ChatThread, ContextSegment, CursorPage, NewAnswerBasi
 /** 한 대화 구간이 유지되는 총 시간. 무활동 시간이 아니라 시작부터의 경과 시간이다. */
 const SESSION_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+/** How many of the closing segment's messages feed the handoff summary. */
+const SUMMARY_SOURCE_LIMIT = 120;
+
 export class ChatRepository {
   constructor(private readonly db: Database) {}
 
@@ -203,7 +206,15 @@ export class ChatRepository {
     )).rows;
   }
 
-  async getOrCreateSegment(threadId: string): Promise<ContextSegment> {
+  /**
+   * `summarize` is called only when a segment ends on the 50 question limit. It receives the
+   * closing segment's messages and returns the text handed to the next segment. A 6 hour
+   * expiry is a clean reset and never calls it (spec.md FR 컨텍스트 구간).
+   */
+  async getOrCreateSegment(
+    threadId: string,
+    summarize?: (messages: ChatMessage[]) => Promise<string | null>
+  ): Promise<ContextSegment> {
     const latest = (await this.db.query<ContextSegment>(
       `SELECT * FROM chat_context_segments WHERE thread_id=$1 ORDER BY segment_number DESC LIMIT 1`,
       [threadId]
@@ -216,11 +227,24 @@ export class ChatRepository {
     if (!sessionExpired && !questionLimitReached) return latest;
 
     const reason = sessionExpired ? 'session_6h' : 'question_limit';
+    let handoff: string | null = null;
+    if (!sessionExpired && questionLimitReached) {
+      const messages = await this.listSegmentMessages(latest.id, SUMMARY_SOURCE_LIMIT);
+      handoff = summarize ? await summarize(messages) : latest.handoff_summary;
+    }
     await this.db.query(
       `UPDATE chat_context_segments SET ended_at=now(), end_reason=$2 WHERE id=$1`,
       [latest.id, reason]
     );
-    return this.createSegment(threadId, latest.segment_number + 1, questionLimitReached ? latest.handoff_summary : null);
+    return this.createSegment(threadId, latest.segment_number + 1, handoff);
+  }
+
+  /** Oldest-first messages of one segment, used as the source text for a handoff summary. */
+  async listSegmentMessages(segmentId: string, limit: number): Promise<ChatMessage[]> {
+    return (await this.db.query<ChatMessage>(
+      `SELECT * FROM chat_messages WHERE segment_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2`,
+      [segmentId, limit]
+    )).rows.reverse();
   }
 
   private async createSegment(threadId: string, segmentNumber: number, summary: string | null = null): Promise<ContextSegment> {

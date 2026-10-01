@@ -12,6 +12,7 @@ import { ToolRegistry } from '../src/modules/chat/tool-registry.js';
 import type { ChatModelProvider, ModelMessage, ProviderResult } from '../src/modules/chat/types.js';
 import { z } from 'zod';
 
+type ChatMessageLike = { content: string };
 const USER_A = '00000000-0000-4000-8000-000000000001';
 const USER_B = '00000000-0000-4000-8000-000000000002';
 const config: AppConfig = {
@@ -540,4 +541,68 @@ test('search returns at most five conversations', async () => {
   registerHistoryTools(registry, repository);
   const result = await registry.execute('search_my_conversations', {}, { ownerUserId: USER_A, currentThreadId: current.id }) as { found: number };
   assert.equal(result.found, 5);
+});
+
+test('a segment closing on the 50 question limit hands a summary to the next one', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  const provider = new ScriptedProvider([]);
+  const service = new ChatService(repository, provider, 200000);
+
+  // 50회를 채운다.
+  for (let index = 1; index <= 50; index += 1) {
+    const segment = await repository.getOrCreateSegment(thread.id);
+    const runId = await repository.reserveRun(thread.id, segment.id, 'mock', 'mock-local');
+    await repository.completeRun({
+      ownerUserId: USER_A, threadId: thread.id, segmentId: segment.id, runId,
+      question: `질문 ${index}`, answer: `답변 ${index}`
+    });
+  }
+  const seen: ChatMessageLike[][] = [];
+  const next = await repository.getOrCreateSegment(thread.id, async (messages) => {
+    seen.push(messages);
+    return 'A브랜드 계약 갱신을 검토 중이며 금액은 미확정이다.';
+  });
+
+  assert.equal(next.segment_number, 2);
+  assert.equal(next.handoff_summary, 'A브랜드 계약 갱신을 검토 중이며 금액은 미확정이다.');
+  // 요약기는 닫히는 구간의 메시지를 오래된 것부터 받는다.
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][0].content, '질문 1');
+  assert.equal(seen[0].at(-1)?.content, '답변 50');
+
+  // 인계 요약이 다음 구간의 시스템 지침에 실린다.
+  const prompt = buildSystemPrompt([], new Date(), next.handoff_summary);
+  assert.match(prompt, /이전 대화 요약/);
+  assert.match(prompt, /A브랜드 계약 갱신/);
+  void service;
+});
+
+test('a segment closing on the 6 hour window hands nothing over', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  const first = await repository.getOrCreateSegment(thread.id);
+  await db.query(`UPDATE chat_context_segments SET started_at=now() - interval '7 hours' WHERE id=$1`, [first.id]);
+
+  let called = false;
+  const next = await repository.getOrCreateSegment(thread.id, async () => { called = true; return '요약'; });
+  assert.equal(called, false);
+  assert.equal(next.handoff_summary, null);
+  assert.equal(buildSystemPrompt([], new Date(), next.handoff_summary).includes('이전 대화 요약'), false);
+});
+
+test('a failed summary does not block the transition', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  for (let index = 1; index <= 50; index += 1) {
+    const segment = await repository.getOrCreateSegment(thread.id);
+    const runId = await repository.reserveRun(thread.id, segment.id, 'mock', 'mock-local');
+    await repository.completeRun({
+      ownerUserId: USER_A, threadId: thread.id, segmentId: segment.id, runId,
+      question: `질문 ${index}`, answer: `답변 ${index}`
+    });
+  }
+  const next = await repository.getOrCreateSegment(thread.id, async () => null);
+  assert.equal(next.segment_number, 2);
+  assert.equal(next.handoff_summary, null);
 });
