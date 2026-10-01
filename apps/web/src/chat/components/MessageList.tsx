@@ -34,7 +34,7 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
 
   return (
     <ScrollArea ref={scrollRootRef} className="min-h-0 flex-1">
-      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col py-6 md:py-10">
+      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col py-6 pt-10 md:pb-10 md:pt-20">
         {messages.length === 0 ? (
           <div className="m-auto flex max-w-lg flex-col items-center py-16 text-center">
             <div className="mb-5 grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-sm"><Sparkles className="size-5" /></div>

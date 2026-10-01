@@ -39,17 +39,6 @@ export function ChatPage() {
       </Sheet>
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-3 px-3 md:px-5">
-          <Button className="md:hidden" variant="ghost" size="icon" onClick={() => setSidebarOpen(true)} aria-label="대화 목록 열기">
-            <Menu />
-          </Button>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">
-              {chat.threads.find((thread) => thread.id === chat.selectedThreadId)?.title ?? '새 대화'}
-            </p>
-            <p className="text-xs text-muted-foreground">사내 ERP 어시스턴트</p>
-          </div>
-        </header>
         <Separator />
         {chat.error ? (
           <Alert variant="destructive" className="mx-auto mt-3 w-[calc(100%-2rem)] max-w-3xl">
