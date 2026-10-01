@@ -42,6 +42,7 @@
 - Fastify 내부 로컬 Tool Registry
 - `pending_action` 기반 추가 질문
 - PostgreSQL 저장 및 30일 보존 후 완전 삭제
+- 현재 저장소에 npm workspaces 모노레포로 구축하고 이후 `wjd-erp`에 모듈 단위 이식
 
 제외 범위:
 
@@ -56,6 +57,8 @@
 - 사용자의 대화·메시지 직접 삭제
 - 다중 사용자 동시 사용 최적화
 - 다중 에이전트와 장시간 워크플로
+- TypeORM 등 신규 ORM 도입
+- Turborepo, Nx, pnpm workspace 등 신규 모노레포 도구 도입
 
 ### 1.3. 운영 전제
 
@@ -64,6 +67,20 @@
 - 모델 공급자는 Claude 하나만 사용한다.
 - 서버에 연결된 단일 Claude Max 계정의 OAuth 인증을 사용한다.
 - Codex는 1차 호출 경로에 포함하지 않는다.
+
+### 1.4. 저장소와 기술 기준
+
+- 1차 초안은 현재 `erp_chatbot` 저장소에 독립 실행 가능한 형태로 구축한다.
+- 루트 `package.json`의 npm workspaces `apps/*` 구성을 사용한다.
+- 백엔드는 `apps/api` Fastify 애플리케이션으로 구성한다.
+- 프론트엔드는 `apps/web` React·Vite 애플리케이션으로 구성한다.
+- 이후 `wjd-erp`의 동일한 `apps/api`, `apps/web` 경로로 모듈 단위 이식한다.
+- 챗봇 기능의 확장을 고려해 백엔드와 프론트엔드 모두 전용 디렉터리로 분리한다.
+- DB 접근은 기존 `apps/api/src/core/db.ts`의 `Database`·`Query` 추상화와 파라미터 SQL을 사용한다.
+- 운영 PostgreSQL은 `pg` connection pool, 로컬·테스트는 기존 PGlite 구성을 따른다.
+- TypeORM이나 다른 ORM을 새로 도입하지 않는다.
+- DB 변경은 `apps/api/db`의 번호 기반 SQL 마이그레이션으로만 적용한다.
+- 이미 적용된 SQL 마이그레이션은 수정하지 않고 다음 번호의 파일을 추가한다.
 
 ---
 
@@ -476,6 +493,87 @@ SELECT pg_size_pretty(pg_total_relation_size('chat_messages'));
 - `n_dead_tup`이 지속적으로 증가하거나 autovacuum이 삭제량을 따라가지 못할 때만 테이블별 autovacuum 값을 조정한다.
 - 1차에서는 일별·월별 파티셔닝을 사용하지 않는다. 수천만 행 규모, 테이블 크기가 서버 메모리를 초과하거나 대량 삭제가 병목이 될 때 다시 검토한다.
 
+### 4.11. 모노레포 모듈 구조
+
+```text
+erp_chatbot/ (이후 wjd-erp로 이식)
+├─ apps/
+│  ├─ api/
+│  │  ├─ db/
+│  │  │  ├─ 116_chat_core.sql
+│  │  │  └─ 117_chat_search.sql
+│  │  ├─ src/
+│  │  │  └─ modules/
+│  │  │     └─ chat/
+│  │  │        ├─ index.ts
+│  │  │        ├─ routes.ts
+│  │  │        ├─ service.ts
+│  │  │        ├─ repository.ts
+│  │  │        ├─ context.ts
+│  │  │        ├─ provider.ts
+│  │  │        ├─ stream.ts
+│  │  │        ├─ tool-registry.ts
+│  │  │        ├─ tools/
+│  │  │        │  ├─ search-my-conversations.ts
+│  │  │        │  ├─ get-conversation-context.ts
+│  │  │        │  ├─ update-conversation-title.ts
+│  │  │        │  └─ update-context-summary.ts
+│  │  │        └─ types.ts
+│  │  └─ tests/
+│  │     └─ chat/
+│  └─ web/
+│     ├─ src/
+│     │  └─ chat/
+│     │     ├─ ChatPage.tsx
+│     │     ├─ api.ts
+│     │     ├─ types.ts
+│     │     ├─ hooks/
+│     │     ├─ components/
+│     │     │  ├─ ConversationSidebar.tsx
+│     │     │  ├─ ConversationList.tsx
+│     │     │  ├─ MessageList.tsx
+│     │     │  ├─ MessageBubble.tsx
+│     │     │  ├─ MessageComposer.tsx
+│     │     │  └─ StreamingIndicator.tsx
+│     │     └─ utils/
+│     │        └─ ndjson.ts
+│     └─ tests/
+│        └─ chat/
+└─ package.json
+```
+
+백엔드 역할:
+
+- `routes.ts`: Fastify 라우트와 요청·응답 스키마
+- `service.ts`: 대화 실행 흐름과 트랜잭션 경계
+- `repository.ts`: 기존 `Database` 인터페이스를 사용하는 파라미터 SQL
+- `context.ts`: 50회·6시간·최근 7일·80% 컨텍스트 정책
+- `provider.ts`: Claude OAuth 모델 어댑터
+- `stream.ts`: NDJSON 이벤트 생성과 연결 종료 처리
+- `tool-registry.ts`: 허용 도구 등록·입력 검증·실행
+- `tools/`: 개별 대화 관리 도구 handler
+
+프론트엔드 역할:
+
+- `ChatPage.tsx`: 챗봇 화면 조합과 라우트 진입점
+- `api.ts`: 대화 CRUD·검색·스트리밍 API 클라이언트
+- `hooks/`: 대화 목록, 무한 스크롤, 스트리밍 상태 관리
+- `components/`: 사이드바·메시지·입력 등 표시 컴포넌트
+- `utils/ndjson.ts`: 조각난 NDJSON 스트림 파싱
+
+의존 방향:
+
+```text
+Fastify route → chat service → repository/provider/tool registry
+React ChatPage → hooks/api → chat components
+```
+
+- route와 React 컴포넌트에서 SQL을 직접 실행하지 않는다.
+- repository에서 HTTP 응답을 만들지 않는다.
+- provider에서 ERP DB를 조회하지 않는다.
+- 프론트엔드는 백엔드 내부 타입 파일을 상대경로로 직접 import하지 않고 API 계약에 맞는 프론트 타입을 유지한다.
+- 공통 패키지는 1차에 만들지 않는다. 실제 중복 타입과 소비자가 늘어날 때 `packages/` 도입을 별도로 결정한다.
+
 ---
 
 ## 5. 작업 목록 (Task Breakdown)
@@ -491,7 +589,10 @@ SELECT pg_size_pretty(pg_total_relation_size('chat_messages'));
 
 ### Backend
 
+- [ ] `apps/api/src/modules/chat/` 모듈 기본 구조 생성
+- [ ] `apps/api/tests/chat/` 테스트 구조 생성
 - [ ] PostgreSQL 마이그레이션과 인덱스 작성
+- [ ] 다음 번호의 `chat` SQL 마이그레이션 작성
 - [ ] 사용자별 대화·스레드별 메시지 복합 인덱스 작성
 - [ ] 30일 삭제용 `created_at` 인덱스 작성
 - [ ] ERP 세션 인증·소유권 검사 구현
@@ -515,6 +616,8 @@ SELECT pg_size_pretty(pg_total_relation_size('chat_messages'));
 
 ### Frontend
 
+- [ ] `apps/web/src/chat/` 기능 모듈 기본 구조 생성
+- [ ] `apps/web/tests/chat/` 테스트 구조 생성
 - [ ] React 기본 레이아웃과 라우팅 구현
 - [ ] 모바일 대화 목록 패널 구현
 - [ ] 날짜 그룹별 대화 목록 구현
