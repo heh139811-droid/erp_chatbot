@@ -23,6 +23,19 @@ export interface ChatMessage {
   content: string;
   created_at: string;
   pending?: boolean;
+  answer_basis?: AnswerBasis[];
+}
+
+export interface AnswerBasis {
+  id: string;
+  source_system: string;
+  source_label: string;
+  explanation: string;
+  period_label: string | null;
+  conditions: string[];
+  calculation: string | null;
+  record_count: number | null;
+  queried_at: string;
 }
 
 export interface CursorPage<T> {
