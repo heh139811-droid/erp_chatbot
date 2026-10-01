@@ -323,3 +323,81 @@ test('parses a tool call and leaves a normal answer alone', () => {
   assert.equal(parseToolCall('계약은 2건입니다.'), undefined);
   assert.throws(() => parseToolCall('<tool_call>not json</tool_call>'), /해석할 수 없습니다/);
 });
+
+test('a session ends 6 hours after it started, not after the last question', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  const first = await repository.getOrCreateSegment(thread.id);
+
+  // 5시간 전에 시작했고 방금 질문했다면 아직 같은 구간이다.
+  await db.query(
+    `UPDATE chat_context_segments SET started_at=now() - interval '5 hours', last_user_message_at=now() WHERE id=$1`,
+    [first.id]
+  );
+  assert.equal((await repository.getOrCreateSegment(thread.id)).id, first.id);
+
+  // 반대로 7시간 전에 시작했다면 방금 질문했어도 새 구간이 열린다.
+  await db.query(
+    `UPDATE chat_context_segments SET started_at=now() - interval '7 hours', last_user_message_at=now() WHERE id=$1`,
+    [first.id]
+  );
+  const second = await repository.getOrCreateSegment(thread.id);
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.segment_number, first.segment_number + 1);
+
+  const closed = await db.query<{ end_reason: string }>('SELECT end_reason FROM chat_context_segments WHERE id=$1', [first.id]);
+  assert.equal(closed.rows[0].end_reason, 'session_6h');
+});
+
+test('an idle conversation inside the 6 hour window keeps the same session', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  const segment = await repository.getOrCreateSegment(thread.id);
+  // 5시간 동안 아무 질문이 없었어도 창이 남아 있으면 같은 구간을 쓴다.
+  await db.query(
+    `UPDATE chat_context_segments SET started_at=now() - interval '5 hours', last_user_message_at=now() - interval '5 hours' WHERE id=$1`,
+    [segment.id]
+  );
+  assert.equal((await repository.getOrCreateSegment(thread.id)).id, segment.id);
+});
+
+test('retention counts from when the conversation was created, not last activity', async () => {
+  const repository = new ChatRepository(db);
+  const old = await repository.createThread(USER_A);
+  const recent = await repository.createThread(USER_A);
+  const segment = await repository.getOrCreateSegment(old.id);
+  const runId = await repository.reserveRun(old.id, segment.id, 'mock', 'mock-local');
+  await repository.completeRun({
+    ownerUserId: USER_A, threadId: old.id, segmentId: segment.id, runId,
+    question: '오래된 대화', answer: '오래된 답변'
+  });
+  // 31일 전에 만들어졌지만 방금 전까지 쓰던 대화도 보존 기간이 끝난다.
+  await db.query(`UPDATE chat_threads SET created_at=now() - interval '31 days', last_activity_at=now() WHERE id=$1`, [old.id]);
+
+  const listed = await repository.listThreads(USER_A, 'active', 30);
+  assert.deepEqual(listed.items.map((thread) => thread.id), [recent.id]);
+
+  const counts = await repository.cleanupExpired();
+  assert.equal(counts.threads, 1);
+  const surviving = (await db.query<{ id: string }>('SELECT id FROM chat_threads')).rows.map((row) => row.id);
+  assert.deepEqual(surviving, [recent.id]);
+  // 스레드가 지워지면 메시지도 CASCADE 로 함께 사라진다.
+  assert.equal((await db.query<{ c: number }>('SELECT COUNT(*)::int AS c FROM chat_messages')).rows[0].c, 0);
+});
+
+test('keeps every message of a conversation still inside its retention window', async () => {
+  const repository = new ChatRepository(db);
+  const thread = await repository.createThread(USER_A);
+  const segment = await repository.getOrCreateSegment(thread.id);
+  const runId = await repository.reserveRun(thread.id, segment.id, 'mock', 'mock-local');
+  await repository.completeRun({
+    ownerUserId: USER_A, threadId: thread.id, segmentId: segment.id, runId,
+    question: '예전 질문', answer: '예전 답변'
+  });
+  // 대화는 20일 전에 시작했고 그 안의 메시지는 40일 전 것이어도 함께 남아야 한다.
+  await db.query(`UPDATE chat_threads SET created_at=now() - interval '20 days' WHERE id=$1`, [thread.id]);
+  await db.query(`UPDATE chat_messages SET created_at=now() - interval '40 days' WHERE thread_id=$1`, [thread.id]);
+
+  await repository.cleanupExpired();
+  assert.equal((await db.query<{ c: number }>('SELECT COUNT(*)::int AS c FROM chat_messages WHERE thread_id=$1', [thread.id])).rows[0].c, 2);
+});

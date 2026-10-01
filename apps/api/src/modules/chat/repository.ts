@@ -3,6 +3,9 @@ import type { Database, Queryable } from '../../core/types.js';
 import { decodeCursor, encodeCursor } from './cursor.js';
 import type { ChatMessage, ChatThread, ContextSegment, CursorPage, NewAnswerBasis, ThreadStatus } from './types.js';
 
+/** 한 대화 구간이 유지되는 총 시간. 무활동 시간이 아니라 시작부터의 경과 시간이다. */
+const SESSION_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 export class ChatRepository {
   constructor(private readonly db: Database) {}
 
@@ -30,7 +33,7 @@ export class ChatRepository {
     const rows = (await this.db.query<ChatThread>(
       `SELECT * FROM chat_threads
        WHERE owner_user_id=$1 AND status=$2
-         AND last_activity_at >= now() - interval '30 days'
+         AND created_at >= now() - interval '30 days'
          ${cursorSql}
        ORDER BY last_activity_at DESC, id DESC
        LIMIT $3`,
@@ -123,7 +126,7 @@ export class ChatRepository {
          ORDER BY segment_number DESC LIMIT 1
        ) s ON true
        WHERE t.owner_user_id=$1
-         AND t.last_activity_at >= now() - interval '30 days'
+         AND t.created_at >= now() - interval '30 days'
          AND (t.title ILIKE $2 OR COALESCE(s.handoff_summary, '') ILIKE $2)
        ORDER BY t.last_activity_at DESC
        LIMIT $3`,
@@ -138,13 +141,12 @@ export class ChatRepository {
     )).rows[0];
     if (!latest) return this.createSegment(threadId, 1);
 
-    const idleExpired = latest.last_user_message_at
-      ? Date.now() - new Date(latest.last_user_message_at).getTime() >= 6 * 60 * 60 * 1000
-      : false;
+    // 한 세션은 구간이 시작된 시점부터 총 6시간이다. 중간에 쉬었는지는 따지지 않는다.
+    const sessionExpired = Date.now() - new Date(latest.started_at).getTime() >= SESSION_WINDOW_MS;
     const questionLimitReached = latest.user_question_count >= 50;
-    if (!idleExpired && !questionLimitReached) return latest;
+    if (!sessionExpired && !questionLimitReached) return latest;
 
-    const reason = idleExpired ? 'idle_6h' : 'question_limit';
+    const reason = sessionExpired ? 'session_6h' : 'question_limit';
     await this.db.query(
       `UPDATE chat_context_segments SET ended_at=now(), end_reason=$2 WHERE id=$1`,
       [latest.id, reason]
@@ -295,7 +297,7 @@ export class ChatRepository {
   async cleanupExpired(): Promise<Record<string, number>> {
     return this.db.transaction(async (tx) => {
       const pending = await tx.query(`DELETE FROM chat_pending_actions WHERE expires_at < now()`);
-      const threads = await tx.query(`DELETE FROM chat_threads WHERE last_activity_at < now() - interval '30 days'`);
+      const threads = await tx.query(`DELETE FROM chat_threads WHERE created_at < now() - interval '30 days'`);
       // Sweeps threads abandoned before their first message (tab closed mid-run, crashed stream).
       // The grace period keeps a run that is still streaming its first answer.
       const emptyThreads = await tx.query(
@@ -304,9 +306,9 @@ export class ChatRepository {
            AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id = t.id)
            AND NOT EXISTS (SELECT 1 FROM chat_runs r WHERE r.thread_id = t.id AND r.status = 'running')`
       );
-      const messages = await tx.query(`DELETE FROM chat_messages WHERE created_at < now() - interval '30 days'`);
-      const runs = await tx.query(`DELETE FROM chat_runs WHERE started_at < now() - interval '30 days'`);
-      return { pending: pending.rowCount, threads: threads.rowCount, empty_threads: emptyThreads.rowCount, messages: messages.rowCount, runs: runs.rowCount };
+      // 메시지와 실행 기록은 chat_threads 의 ON DELETE CASCADE 로 함께 지워진다.
+      // 나이로 따로 지우면 아직 보존 기간이 남은 대화의 앞부분만 사라져 이력에 구멍이 생긴다.
+      return { pending: pending.rowCount, threads: threads.rowCount, empty_threads: emptyThreads.rowCount };
     });
   }
 }

@@ -46,7 +46,7 @@ export interface ContextSegment {
   started_at: string;
   last_user_message_at: string | null;
   ended_at: string | null;
-  end_reason: 'question_limit' | 'idle_6h' | 'manual_new_chat' | null;
+  end_reason: 'question_limit' | 'session_6h' | 'idle_6h' | 'manual_new_chat' | null;
 }
 
 export interface CursorPage<T> {
