@@ -3,6 +3,7 @@ import { afterEach, beforeEach, test } from 'node:test';
 import { createApp } from '../src/app.js';
 import type { AppConfig } from '../src/core/config.js';
 import { createDatabase, migrate } from '../src/core/db.js';
+import { startCleanupScheduler } from '../src/core/cleanup-scheduler.js';
 import type { Database } from '../src/core/types.js';
 import { ChatRepository } from '../src/modules/chat/repository.js';
 import { OUT_OF_SCOPE_REPLY, SYSTEM_PROMPT, buildModelMessages, buildSystemPrompt, parseToolCall } from '../src/modules/chat/context.js';
@@ -605,4 +606,62 @@ test('a failed summary does not block the transition', async () => {
   const next = await repository.getOrCreateSegment(thread.id, async () => null);
   assert.equal(next.segment_number, 2);
   assert.equal(next.handoff_summary, null);
+});
+
+test('the cleanup scheduler deletes on each pass and never overlaps itself', async () => {
+  const repository = new ChatRepository(db);
+  const expired = await repository.createThread(USER_A);
+  await db.query(`UPDATE chat_threads SET created_at=now() - interval '31 days' WHERE id=$1`, [expired.id]);
+  const fresh = await repository.createThread(USER_A);
+
+  // 큰 주기를 줘서 타이머가 아니라 runOnce 만 돌게 한다.
+  const scheduler = startCleanupScheduler(repository, 60 * 60 * 1000);
+  try {
+    await scheduler.runOnce();
+    const surviving = (await db.query<{ id: string }>('SELECT id FROM chat_threads')).rows.map((row) => row.id);
+    assert.deepEqual(surviving, [fresh.id]);
+
+    // 동시에 두 번 불러도 한 번만 실행된다.
+    let calls = 0;
+    const slow = {
+      cleanupExpired: async () => { calls += 1; await new Promise((r) => setTimeout(r, 30)); return {}; }
+    } as unknown as ChatRepository;
+    const guarded = startCleanupScheduler(slow, 60 * 60 * 1000);
+    await Promise.all([guarded.runOnce(), guarded.runOnce()]);
+    assert.equal(calls, 1);
+    guarded.stop();
+  } finally {
+    scheduler.stop();
+  }
+});
+
+test('a failing cleanup pass does not throw', async () => {
+  const broken = { cleanupExpired: async () => { throw new Error('DB down'); } } as unknown as ChatRepository;
+  const scheduler = startCleanupScheduler(broken, 60 * 60 * 1000);
+  try {
+    await scheduler.runOnce();
+  } finally {
+    scheduler.stop();
+  }
+});
+
+test('database session and prompt date share one time zone', async () => {
+  const seoul = await createDatabase(undefined, undefined, 'Asia/Seoul');
+  try {
+    const row = (await seoul.query<{ tz: string; bare: string }>(
+      `SELECT current_setting('TimeZone') AS tz,
+              ('2026-09-30T00:00'::timestamptz AT TIME ZONE 'UTC')::text AS bare`
+    )).rows[0];
+    assert.equal(row.tz, 'Asia/Seoul');
+    // KST 자정은 전날 15:00 UTC 다. GMT 로 해석하면 09:00 어긋난다.
+    assert.match(row.bare, /2026-09-29 15:00/);
+  } finally {
+    await seoul.close();
+  }
+  const prompt = buildSystemPrompt([], new Date('2026-09-30T16:00:00Z'), null, 'Asia/Seoul');
+  assert.match(prompt, /2026년 10월 1일/); // UTC 로는 9월 30일, KST 로는 10월 1일
+});
+
+test('an unsupported time zone is rejected before it reaches SQL', async () => {
+  await assert.rejects(() => createDatabase(undefined, undefined, "Asia/Seoul'; DROP TABLE chat_threads --"), /Unsupported time zone/);
 });

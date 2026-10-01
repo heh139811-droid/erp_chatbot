@@ -24,7 +24,7 @@ export async function createApp(config: AppConfig, db: Database, crmDb?: CrmData
   const tools = new ToolRegistry();
   registerHistoryTools(tools, repository);
   if (crmDb) registerCrmTools(tools, crmDb);
-  const service = new ChatService(repository, provider, config.contextMaxTokens, tools);
+  const service = new ChatService(repository, provider, config.contextMaxTokens, tools, config.timeZone);
   registerChatRoutes(app, { config, repository, service });
   if (crmDb) registerCrmRoutes(app, config, new CrmRepository(crmDb));
 

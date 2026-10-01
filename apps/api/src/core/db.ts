@@ -5,9 +5,23 @@ import { PGlite } from '@electric-sql/pglite';
 import { Pool, type PoolClient } from 'pg';
 import type { Database, Queryable } from './types.js';
 
-export async function createDatabase(databaseUrl?: string, dataDir?: string): Promise<Database> {
+/**
+ * 세션 시간대를 고정한다. timestamptz 저장은 늘 절대 시각이라 바뀌지 않고,
+ * 오프셋 없는 입력 문자열의 해석과 출력 표기만 이 기준을 따른다.
+ * 모델이 넘기는 "어제 00:00" 같은 값이 한국 시각으로 읽히게 하려면 필요하다.
+ */
+export const DEFAULT_TIME_ZONE = 'Asia/Seoul';
+
+export async function createDatabase(databaseUrl?: string, dataDir?: string, timeZone: string = DEFAULT_TIME_ZONE): Promise<Database> {
+  assertTimeZone(timeZone);
   if (databaseUrl) {
-    const pool = new Pool({ connectionString: databaseUrl, max: 10, connectionTimeoutMillis: 10000, statement_timeout: 30000 });
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      max: 10,
+      connectionTimeoutMillis: 10000,
+      statement_timeout: 30000,
+      options: `-c timezone=${timeZone}`
+    });
     const wrap = (client: Pool | PoolClient): Queryable => ({
       query: async <T>(sql: string, params: unknown[] = []) => {
         const result = await client.query(sql, params);
@@ -38,6 +52,8 @@ export async function createDatabase(databaseUrl?: string, dataDir?: string): Pr
   if (dataDir) await mkdir(dataDir, { recursive: true });
   const db = new PGlite(dataDir);
   await db.waitReady;
+  // PGlite 는 연결이 하나뿐이라 세션 설정이 그대로 유지된다.
+  await db.query(`SET TIME ZONE '${timeZone}'`);
   const wrap = (client: Pick<PGlite, 'query'>): Queryable => ({
     query: async <T>(sql: string, params: unknown[] = []) => {
       const result = await client.query<T>(sql, params);
@@ -50,6 +66,13 @@ export async function createDatabase(databaseUrl?: string, dataDir?: string): Pr
     transaction: <T>(fn: (tx: Queryable) => Promise<T>) => db.transaction((tx) => fn(wrap(tx))),
     close: () => db.close()
   };
+}
+
+/** Rejects anything that could escape the quoted SET TIME ZONE literal. */
+function assertTimeZone(timeZone: string): void {
+  if (!/^[A-Za-z][A-Za-z0-9_+\-]*(\/[A-Za-z0-9_+\-]+)*$/.test(timeZone)) {
+    throw new Error(`Unsupported time zone: ${timeZone}`);
+  }
 }
 
 export async function migrate(db: Database): Promise<void> {

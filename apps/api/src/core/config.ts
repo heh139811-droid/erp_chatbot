@@ -1,10 +1,14 @@
 import { resolve } from 'node:path';
+import { DEFAULT_TIME_ZONE } from './db.js';
 
 export interface AppConfig {
   host: string;
   port: number;
   databaseUrl?: string;
   pgliteDataDir: string;
+  timeZone: string;
+  /** 보존 기간이 지난 데이터를 지우는 주기. 0 이면 내부 타이머를 띄우지 않는다. */
+  cleanupIntervalMs: number;
   provider: 'mock' | 'claude-cli';
   claudeCommand: string;
   claudeModel: string;
@@ -34,6 +38,8 @@ export function loadConfig(): AppConfig {
     port: Number(process.env.PORT ?? 3000),
     databaseUrl: process.env.DATABASE_URL || undefined,
     pgliteDataDir: resolve(process.env.PGLITE_DATA_DIR ?? '.data/chat'),
+    timeZone: process.env.DB_TIME_ZONE ?? DEFAULT_TIME_ZONE,
+    cleanupIntervalMs: Number(process.env.CLEANUP_INTERVAL_MS ?? 24 * 60 * 60 * 1000),
     provider,
     claudeCommand: process.env.CLAUDE_COMMAND ?? 'claude',
     claudeModel: process.env.CLAUDE_MODEL ?? 'sonnet',

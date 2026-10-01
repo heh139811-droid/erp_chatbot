@@ -8,6 +8,7 @@ import {
   renderToolError,
   renderToolResult
 } from './context.js';
+import { DEFAULT_TIME_ZONE } from '../../core/db.js';
 import { ChatRepository } from './repository.js';
 import { ToolRegistry, type ToolContext } from './tool-registry.js';
 import type { ChatMessage, ChatModelProvider, ModelMessage, NewAnswerBasis, ProviderResult, StreamEvent } from './types.js';
@@ -20,7 +21,8 @@ export class ChatService {
     private readonly repository: ChatRepository,
     private readonly provider: ChatModelProvider,
     private readonly contextMaxTokens: number,
-    private readonly tools: ToolRegistry = new ToolRegistry()
+    private readonly tools: ToolRegistry = new ToolRegistry(),
+    private readonly timeZone: string = DEFAULT_TIME_ZONE
   ) {}
 
   async *sendMessage(input: {
@@ -36,7 +38,7 @@ export class ChatService {
     const runId = await this.repository.reserveRun(thread.id, segment.id, this.provider.name, this.provider.model);
     yield { type: 'run_started', run_id: runId };
 
-    const systemPrompt = buildSystemPrompt(this.tools.specs(), new Date(), segment.handoff_summary);
+    const systemPrompt = buildSystemPrompt(this.tools.specs(), new Date(), segment.handoff_summary, this.timeZone);
     const conversation = buildModelMessages(history, input.question);
     const answerBasis: NewAnswerBasis[] = [];
 

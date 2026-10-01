@@ -1,3 +1,4 @@
+import { DEFAULT_TIME_ZONE } from '../../core/db.js';
 import type { ToolSpec } from './tool-registry.js';
 import type { ChatMessage, ModelMessage } from './types.js';
 
@@ -22,10 +23,6 @@ const NO_TOOL_RULE = '제공된 대화 문맥 안에서만 답하고 알 수 없
 
 export const SYSTEM_PROMPT = [...BASE_RULES, NO_TOOL_RULE].join('\n');
 
-/**
- * Builds the model's system instructions. With tools registered it also carries the
- * tool catalogue and the call protocol, matching steps 1-2 of FR-10 in the spec.
- */
 /** Instructions for the extra model call that closes a 50 question segment. */
 export const SUMMARY_SYSTEM_PROMPT = [
   '당신은 사내 ERP 챗봇의 대화 요약기다.',
@@ -43,10 +40,14 @@ export function buildSummaryRequest(messages: ChatMessage[]): ModelMessage[] {
   return [{ role: 'user', content: `${transcript}\n\n---\n위 대화를 다음 구간에 인계할 요약으로 정리하라.` }];
 }
 
-export function buildSystemPrompt(tools: ToolSpec[] = [], now: Date = new Date(), handoffSummary?: string | null): string {
+/**
+ * Builds the model's system instructions. With tools registered it also carries the
+ * tool catalogue and the call protocol, matching steps 1-2 of FR-10 in the spec.
+ */
+export function buildSystemPrompt(tools: ToolSpec[] = [], now: Date = new Date(), handoffSummary?: string | null, timeZone: string = DEFAULT_TIME_ZONE): string {
   // 상대 날짜("어제", "저번 주")를 해석하려면 오늘이 며칠인지 알아야 한다.
-  // 서버 로컬 시각을 쓰므로 DB 의 now() 와 같은 기준이다.
-  const today = `오늘은 ${formatToday(now)}이다. "어제", "지난주" 같은 표현은 이 날짜를 기준으로 계산한다.`;
+  // DB 세션과 같은 시간대로 찍어야 모델이 넘기는 날짜 문자열이 같은 기준으로 해석된다.
+  const today = `오늘은 ${formatToday(now, timeZone)}이다. "어제", "지난주" 같은 표현은 이 날짜를 기준으로 계산한다.`;
   const handoff = handoffSummary?.trim()
     ? [
         '',
@@ -130,6 +131,6 @@ export function renderToolError(name: string, message: string): string {
   return `[${name} 실패]\n${message}\n다른 방법으로 다시 시도하거나, 조회할 수 없다고 사용자에게 알린다.`;
 }
 
-function formatToday(now: Date): string {
-  return new Intl.DateTimeFormat('ko-KR', { dateStyle: 'full' }).format(now);
+function formatToday(now: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('ko-KR', { dateStyle: 'full', timeZone }).format(now);
 }
