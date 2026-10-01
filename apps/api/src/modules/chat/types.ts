@@ -19,7 +19,22 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   created_at: string;
+  answer_basis: AnswerBasis[];
 }
+
+export interface AnswerBasis {
+  id: string;
+  source_system: string;
+  source_label: string;
+  explanation: string;
+  period_label: string | null;
+  conditions: string[];
+  calculation: string | null;
+  record_count: number | null;
+  queried_at: string;
+}
+
+export type NewAnswerBasis = Omit<AnswerBasis, 'id' | 'queried_at'> & { queried_at?: string };
 
 export interface ContextSegment {
   id: string;
@@ -57,7 +72,7 @@ export interface ProviderResult {
 export interface ChatModelProvider {
   readonly name: string;
   readonly model: string;
-  stream(messages: ModelMessage[], signal: AbortSignal): AsyncGenerator<string, ProviderResult>;
+  stream(messages: ModelMessage[], signal: AbortSignal, systemPrompt: string): AsyncGenerator<string, ProviderResult>;
 }
 
 export type StreamEvent =
@@ -65,4 +80,3 @@ export type StreamEvent =
   | { type: 'text_delta'; run_id: string; delta: string }
   | { type: 'completed'; run_id: string; message_id: string }
   | { type: 'error'; run_id: string; code: string; message: string };
-

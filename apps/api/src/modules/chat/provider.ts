@@ -6,7 +6,7 @@ export class MockChatProvider implements ChatModelProvider {
   readonly name = 'mock';
   readonly model = 'mock-local';
 
-  async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncGenerator<string, ProviderResult> {
+  async *stream(messages: ModelMessage[], signal: AbortSignal, _systemPrompt: string): AsyncGenerator<string, ProviderResult> {
     const question = messages.at(-1)?.content ?? '';
     const response = `질문을 확인했습니다: ${question}\n\n현재는 로컬 mock 공급자입니다. .env.local에서 CHAT_PROVIDER=claude-cli로 설정하면 Claude Code OAuth를 사용합니다.`;
     for (let index = 0; index < response.length; index += 24) {
@@ -23,7 +23,7 @@ export class ClaudeCliProvider implements ChatModelProvider {
 
   constructor(readonly model: string, private readonly command: string) {}
 
-  async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncGenerator<string, ProviderResult> {
+  async *stream(messages: ModelMessage[], signal: AbortSignal, systemPrompt: string): AsyncGenerator<string, ProviderResult> {
     const prompt = serializeMessages(messages);
     const child = spawn(this.command, [
       '-p',
@@ -31,6 +31,8 @@ export class ClaudeCliProvider implements ChatModelProvider {
       '--verbose',
       '--model', this.model,
       '--max-turns', '1',
+      // Delivered as a real system prompt so the scope limit is not overridable from the chat turn.
+      '--append-system-prompt', systemPrompt,
       '--disallowedTools', 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,NotebookEdit,Task'
     ], { env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 

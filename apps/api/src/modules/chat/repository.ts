@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Database, Queryable } from '../../core/types.js';
 import { decodeCursor, encodeCursor } from './cursor.js';
-import type { ChatMessage, ChatThread, ContextSegment, CursorPage, ThreadStatus } from './types.js';
+import type { ChatMessage, ChatThread, ContextSegment, CursorPage, NewAnswerBasis, ThreadStatus } from './types.js';
 
 export class ChatRepository {
   constructor(private readonly db: Database) {}
@@ -53,13 +53,48 @@ export class ChatRepository {
     )).rows[0];
   }
 
+  async deleteThread(ownerUserId: string, threadId: string): Promise<boolean> {
+    const result = await this.db.query(
+      `DELETE FROM chat_threads WHERE id=$1 AND owner_user_id=$2`,
+      [threadId, ownerUserId]
+    );
+    return result.rowCount > 0;
+  }
+
+  /** Drops a thread that never produced a message, so an abandoned "새 대화" leaves nothing behind. */
+  async deleteThreadIfEmpty(ownerUserId: string, threadId: string): Promise<boolean> {
+    const result = await this.db.query(
+      `DELETE FROM chat_threads
+       WHERE id=$1 AND owner_user_id=$2
+         AND NOT EXISTS (SELECT 1 FROM chat_messages WHERE thread_id=$1)`,
+      [threadId, ownerUserId]
+    );
+    return result.rowCount > 0;
+  }
+
   async listMessages(ownerUserId: string, threadId: string, limit: number, cursorValue?: string): Promise<CursorPage<ChatMessage>> {
     const cursor = decodeCursor(cursorValue);
     const params: unknown[] = [threadId, ownerUserId, limit + 1];
     const cursorSql = cursor ? `AND (m.created_at, m.id) < ($4::timestamptz, $5::uuid)` : '';
     if (cursor) params.push(cursor.timestamp, cursor.id);
     const rows = (await this.db.query<ChatMessage>(
-      `SELECT m.* FROM chat_messages m
+      `SELECT m.*,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'id', b.id,
+                  'source_system', b.source_system,
+                  'source_label', b.source_label,
+                  'explanation', b.explanation,
+                  'period_label', b.period_label,
+                  'conditions', b.conditions,
+                  'calculation', b.calculation,
+                  'record_count', b.record_count,
+                  'queried_at', b.queried_at
+                ) ORDER BY b.created_at)
+                FROM chat_answer_basis b
+                WHERE b.message_id=m.id
+              ), '[]'::json) AS answer_basis
+       FROM chat_messages m
        JOIN chat_threads t ON t.id=m.thread_id
        WHERE m.thread_id=$1 AND t.owner_user_id=$2 ${cursorSql}
        ORDER BY m.created_at DESC, m.id DESC
@@ -161,6 +196,32 @@ export class ChatRepository {
     }
   }
 
+  /** Records one tool invocation for the answer-basis panel and for auditing. */
+  async recordToolCall(input: {
+    runId: string;
+    toolName: string;
+    targetRefs?: unknown[];
+    resultCount?: number;
+    status: 'succeeded' | 'failed' | 'rejected';
+    durationMs: number;
+    errorCode?: string;
+  }): Promise<void> {
+    await this.db.query(
+      `INSERT INTO chat_tool_calls(id, run_id, tool_name, target_refs, result_count, status, duration_ms, error_code)
+       VALUES($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
+      [
+        randomUUID(),
+        input.runId,
+        input.toolName,
+        JSON.stringify(input.targetRefs ?? []),
+        input.resultCount ?? null,
+        input.status,
+        input.durationMs,
+        input.errorCode ?? null
+      ]
+    );
+  }
+
   async markFirstToken(runId: string): Promise<void> {
     await this.db.query(`UPDATE chat_runs SET first_token_at=COALESCE(first_token_at, now()) WHERE id=$1`, [runId]);
   }
@@ -174,6 +235,7 @@ export class ChatRepository {
     answer: string;
     inputTokens?: number;
     outputTokens?: number;
+    answerBasis?: NewAnswerBasis[];
   }): Promise<string> {
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
@@ -189,6 +251,19 @@ export class ChatRepository {
         `UPDATE chat_runs SET status='completed', completed_at=now(), input_tokens=$2, output_tokens=$3 WHERE id=$1`,
         [input.runId, input.inputTokens ?? null, input.outputTokens ?? null]
       );
+      for (const basis of input.answerBasis ?? []) {
+        await tx.query(
+          `INSERT INTO chat_answer_basis(
+             id, message_id, source_system, source_label, explanation,
+             period_label, conditions, calculation, record_count, queried_at
+           ) VALUES($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, COALESCE($10::timestamptz, now()))`,
+          [
+            randomUUID(), assistantMessageId, basis.source_system, basis.source_label, basis.explanation,
+            basis.period_label, JSON.stringify(basis.conditions), basis.calculation, basis.record_count,
+            basis.queried_at ?? null
+          ]
+        );
+      }
       await tx.query(
         `UPDATE chat_context_segments
          SET user_question_count=user_question_count+1, last_user_message_at=now()
@@ -221,9 +296,17 @@ export class ChatRepository {
     return this.db.transaction(async (tx) => {
       const pending = await tx.query(`DELETE FROM chat_pending_actions WHERE expires_at < now()`);
       const threads = await tx.query(`DELETE FROM chat_threads WHERE last_activity_at < now() - interval '30 days'`);
+      // Sweeps threads abandoned before their first message (tab closed mid-run, crashed stream).
+      // The grace period keeps a run that is still streaming its first answer.
+      const emptyThreads = await tx.query(
+        `DELETE FROM chat_threads t
+         WHERE t.created_at < now() - interval '1 hour'
+           AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM chat_runs r WHERE r.thread_id = t.id AND r.status = 'running')`
+      );
       const messages = await tx.query(`DELETE FROM chat_messages WHERE created_at < now() - interval '30 days'`);
       const runs = await tx.query(`DELETE FROM chat_runs WHERE started_at < now() - interval '30 days'`);
-      return { pending: pending.rowCount, threads: threads.rowCount, messages: messages.rowCount, runs: runs.rowCount };
+      return { pending: pending.rowCount, threads: threads.rowCount, empty_threads: emptyThreads.rowCount, messages: messages.rowCount, runs: runs.rowCount };
     });
   }
 }

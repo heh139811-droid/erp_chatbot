@@ -1,12 +1,24 @@
-import { buildModelMessages } from './context.js';
+import {
+  buildModelMessages,
+  buildSystemPrompt,
+  mayBecomeToolCall,
+  parseToolCall,
+  renderToolError,
+  renderToolResult
+} from './context.js';
 import { ChatRepository } from './repository.js';
-import type { ChatModelProvider, ProviderResult, StreamEvent } from './types.js';
+import { ToolRegistry } from './tool-registry.js';
+import type { ChatModelProvider, ModelMessage, NewAnswerBasis, ProviderResult, StreamEvent } from './types.js';
+
+/** How many tool hops one question may take before the model must answer with what it has. */
+const MAX_TOOL_ITERATIONS = 6;
 
 export class ChatService {
   constructor(
     private readonly repository: ChatRepository,
     private readonly provider: ChatModelProvider,
-    private readonly contextMaxTokens: number
+    private readonly contextMaxTokens: number,
+    private readonly tools: ToolRegistry = new ToolRegistry()
   ) {}
 
   async *sendMessage(input: {
@@ -22,24 +34,65 @@ export class ChatService {
     const runId = await this.repository.reserveRun(thread.id, segment.id, this.provider.name, this.provider.model);
     yield { type: 'run_started', run_id: runId };
 
+    const systemPrompt = buildSystemPrompt(this.tools.specs());
+    const conversation = buildModelMessages(history, input.question);
+    const answerBasis: NewAnswerBasis[] = [];
+
     let answer = '';
     let firstToken = true;
     try {
-      const iterator = this.provider.stream(buildModelMessages(history, input.question), input.signal);
       let usage: ProviderResult | undefined;
-      while (true) {
-        const next = await iterator.next();
-        if (next.done) {
-          usage = next.value;
+
+      for (let iteration = 0; ; iteration += 1) {
+        const lastHop = iteration >= MAX_TOOL_ITERATIONS;
+        const turn = this.runTurn(conversation, input.signal, lastHop ? withFinalAnswerNudge(systemPrompt) : systemPrompt);
+
+        let buffered = '';
+        let streaming = false;
+        while (true) {
+          const next = await turn.next();
+          if (next.done) {
+            usage = next.value;
+            break;
+          }
+          buffered += next.value;
+          // Hold the output back only while it could still turn out to be a tool call.
+          if (!streaming && !mayBecomeToolCall(buffered)) {
+            streaming = true;
+            if (firstToken) {
+              firstToken = false;
+              await this.repository.markFirstToken(runId);
+            }
+            answer += buffered;
+            yield { type: 'text_delta', run_id: runId, delta: buffered };
+            continue;
+          }
+          if (streaming) {
+            answer += next.value;
+            yield { type: 'text_delta', run_id: runId, delta: next.value };
+          }
+        }
+
+        if (streaming) break;
+
+        const call = parseToolCall(buffered);
+        if (!call) {
+          // A short turn that never left the buffer: emit it as the answer.
+          if (firstToken) {
+            firstToken = false;
+            await this.repository.markFirstToken(runId);
+          }
+          answer += buffered;
+          if (buffered) yield { type: 'text_delta', run_id: runId, delta: buffered };
           break;
         }
-        if (firstToken) {
-          firstToken = false;
-          await this.repository.markFirstToken(runId);
-        }
-        answer += next.value;
-        yield { type: 'text_delta', run_id: runId, delta: next.value };
+
+        conversation.push({ role: 'assistant', content: buffered.trim() });
+        const outcome = await this.invokeTool(runId, call.name, call.input);
+        conversation.push({ role: 'user', content: outcome.rendered });
+        if (outcome.basis) answerBasis.push(outcome.basis);
       }
+
       if (!answer.trim()) throw new Error('Provider returned an empty response');
       const messageId = await this.repository.completeRun({
         ownerUserId: input.ownerUserId,
@@ -48,6 +101,7 @@ export class ChatService {
         runId,
         question: input.question,
         answer,
+        answerBasis,
         inputTokens: usage?.usage?.inputTokens,
         outputTokens: usage?.usage?.outputTokens
       });
@@ -55,12 +109,86 @@ export class ChatService {
     } catch (error) {
       if (input.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
         await this.repository.cancelRun(runId, thread.id);
+        await this.repository.deleteThreadIfEmpty(input.ownerUserId, thread.id);
         return;
       }
+      // The client only sees a generic message, so the real cause (auth, model, CLI) must reach the server log.
+      console.error(JSON.stringify({
+        event: 'chat_provider_failed',
+        run_id: runId,
+        thread_id: thread.id,
+        provider: this.provider.name,
+        model: this.provider.model,
+        message: error instanceof Error ? error.message : String(error)
+      }));
       await this.repository.failRun(runId, 'PROVIDER_ERROR');
+      await this.repository.deleteThreadIfEmpty(input.ownerUserId, thread.id);
       yield { type: 'error', run_id: runId, code: 'PROVIDER_ERROR', message: '현재 답변을 생성할 수 없습니다.' };
     }
   }
+
+  private runTurn(conversation: ModelMessage[], signal: AbortSignal, systemPrompt: string) {
+    return this.provider.stream([...conversation], signal, systemPrompt);
+  }
+
+  /** Runs one tool and turns both success and failure into something the model can read. */
+  private async invokeTool(runId: string, name: string, input: unknown): Promise<{ rendered: string; basis?: NewAnswerBasis }> {
+    const startedAt = Date.now();
+    if (!this.tools.has(name)) {
+      await this.repository.recordToolCall({
+        runId, toolName: name, status: 'rejected', durationMs: Date.now() - startedAt, errorCode: 'TOOL_NOT_ALLOWED'
+      });
+      return { rendered: renderToolError(name, `허용되지 않은 도구입니다: ${name}`) };
+    }
+    try {
+      const result = await this.tools.execute(name, input);
+      const rowCount = readRowCount(result);
+      await this.repository.recordToolCall({
+        runId, toolName: name, status: 'succeeded', resultCount: rowCount, durationMs: Date.now() - startedAt
+      });
+      return { rendered: renderToolResult(name, result), basis: toAnswerBasis(name, input, result, rowCount) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.repository.recordToolCall({
+        runId,
+        toolName: name,
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        errorCode: String((error as { code?: string }).code ?? 'TOOL_FAILED')
+      });
+      return { rendered: renderToolError(name, message) };
+    }
+  }
+}
+
+function withFinalAnswerNudge(systemPrompt: string): string {
+  return `${systemPrompt}\n\n[중요] 도구 호출 한도에 도달했다. 이번에는 도구를 호출하지 말고 지금까지 확인한 내용만으로 최종 답변을 작성한다.`;
+}
+
+function readRowCount(result: unknown): number | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const record = result as Record<string, unknown>;
+  for (const key of ['row_count', 'table_count']) {
+    if (typeof record[key] === 'number') return record[key] as number;
+  }
+  return Array.isArray(record.columns) ? record.columns.length : undefined;
+}
+
+/** Only data reads become user-visible answer basis; schema browsing does not. */
+function toAnswerBasis(name: string, input: unknown, result: unknown, rowCount?: number): NewAnswerBasis | undefined {
+  if (name !== 'crm_query') return undefined;
+  const request = (typeof input === 'object' && input !== null ? input : {}) as { purpose?: unknown; sql?: unknown };
+  const executed = (typeof result === 'object' && result !== null ? result : {}) as { executed_sql?: unknown };
+  const sql = typeof executed.executed_sql === 'string' ? executed.executed_sql : typeof request.sql === 'string' ? request.sql : '';
+  return {
+    source_system: 'CRM',
+    source_label: 'CRM 데이터베이스',
+    explanation: typeof request.purpose === 'string' && request.purpose ? request.purpose : 'CRM 데이터 조회',
+    period_label: null,
+    conditions: sql ? [sql] : [],
+    calculation: null,
+    record_count: rowCount ?? null
+  };
 }
 
 function notFound(): Error {
