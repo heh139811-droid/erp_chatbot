@@ -42,7 +42,7 @@ export function buildSystemPrompt(tools: ToolSpec[] = [], now: Date = new Date()
     '도구 결과를 받으면 필요한 만큼 도구를 더 호출할 수 있다.',
     '충분한 정보를 얻었으면 도구를 호출하지 말고 최종 답변을 한국어로 작성한다.',
     '어느 테이블을 봐야 할지 모르면 crm_list_tables 로 목록을 먼저 보고, crm_describe_table 로 컬럼을 확인한 뒤 crm_query 를 실행한다.',
-    '지난 대화를 되짚는 질문은 chat_search_history 로 찾고, 자세한 내용이 필요하면 chat_read_conversation 으로 읽는다. 기억에 의존해 답하지 않는다.',
+    '지난 대화를 되짚는 질문은 search_my_conversations 로 찾고, 내용이 필요하면 get_conversation_context 로 가져온다. 기억에 의존해 답하지 않는다.',
     '도구 결과에 없는 수치나 사실은 절대 지어내지 않는다. 조회해도 자료가 없으면 없다고 답한다.',
     '최종 답변에는 도구 호출 형식이나 SQL 원문을 그대로 노출하지 않고, 확인한 내용을 업무 용어로 설명한다.',
     '',

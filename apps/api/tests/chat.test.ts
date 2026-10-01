@@ -425,7 +425,7 @@ test('history search finds the owner past conversations and hides other users', 
   registerHistoryTools(registry, repository);
   const context = { ownerUserId: USER_A, currentThreadId: current.id };
 
-  const found = await registry.execute('chat_search_history', { query: '계약 해지' }, context) as {
+  const found = await registry.execute('search_my_conversations', { query: '계약 해지' }, context) as {
     found: number;
     conversations: Array<{ thread_id: string }>;
   };
@@ -433,7 +433,7 @@ test('history search finds the owner past conversations and hides other users', 
   assert.equal(found.conversations[0].thread_id, mine);
 
   // USER_B 가 같은 도구를 써도 자기 대화만 보인다.
-  const theirs = await registry.execute('chat_search_history', { query: '계약 해지' }, { ownerUserId: USER_B, currentThreadId: current.id }) as { conversations: Array<{ thread_id: string }> };
+  const theirs = await registry.execute('search_my_conversations', { query: '계약 해지' }, { ownerUserId: USER_B, currentThreadId: current.id }) as { conversations: Array<{ thread_id: string }> };
   assert.ok(!theirs.conversations.some((row) => row.thread_id === mine));
 });
 
@@ -445,7 +445,7 @@ test('history search excludes the current conversation and anything past 30 days
 
   const registry = new ToolRegistry();
   registerHistoryTools(registry, repository);
-  const result = await registry.execute('chat_search_history', {}, { ownerUserId: USER_A, currentThreadId: current }) as {
+  const result = await registry.execute('search_my_conversations', {}, { ownerUserId: USER_A, currentThreadId: current }) as {
     conversations: Array<{ thread_id: string }>;
   };
   assert.deepEqual(result.conversations.map((row) => row.thread_id), []);
@@ -463,9 +463,9 @@ test('history search narrows by date range', async () => {
   const context = { ownerUserId: USER_A, currentThreadId: current.id };
   const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
 
-  const before = await registry.execute('chat_search_history', { to: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
+  const before = await registry.execute('search_my_conversations', { to: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
   assert.deepEqual(before.conversations.map((r) => r.thread_id), [yesterday]);
-  const after = await registry.execute('chat_search_history', { from: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
+  const after = await registry.execute('search_my_conversations', { from: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
   assert.deepEqual(after.conversations.map((r) => r.thread_id), [today]);
 });
 
@@ -479,11 +479,11 @@ test('reading a past conversation is refused for another user and for the curren
   registerHistoryTools(registry, repository);
   const context = { ownerUserId: USER_A, currentThreadId: current.id };
 
-  const read = await registry.execute('chat_read_conversation', { thread_id: mine }, context) as { messages: Array<{ role: string; content: string }> };
-  assert.deepEqual(read.messages.map((m) => m.content), ['내 대화', '내 답변']);
+  const read = await registry.execute('get_conversation_context', { thread_id: mine }, context) as { recent_messages: Array<{ role: string; content: string }> };
+  assert.deepEqual(read.recent_messages.map((m) => m.content), ['내 대화', '내 답변']);
 
-  await assert.rejects(() => registry.execute('chat_read_conversation', { thread_id: theirs }, context), /찾을 수 없습니다/);
-  await assert.rejects(() => registry.execute('chat_read_conversation', { thread_id: current.id }, context), /진행 중인 대화/);
+  await assert.rejects(() => registry.execute('get_conversation_context', { thread_id: theirs }, context), /찾을 수 없습니다/);
+  await assert.rejects(() => registry.execute('get_conversation_context', { thread_id: current.id }, context), /진행 중인 대화/);
 });
 
 test('the model can answer from a past conversation through the tool loop', async () => {
@@ -494,8 +494,8 @@ test('the model can answer from a past conversation through the tool loop', asyn
   registerHistoryTools(registry, repository);
 
   const provider = new ScriptedProvider([
-    '<tool_call>{"name":"chat_search_history","input":{"query":"세금계산서"}}</tool_call>',
-    `<tool_call>{"name":"chat_read_conversation","input":{"thread_id":"${past}"}}</tool_call>`,
+    '<tool_call>{"name":"search_my_conversations","input":{"query":"세금계산서"}}</tool_call>',
+    `<tool_call>{"name":"get_conversation_context","input":{"thread_id":"${past}"}}</tool_call>`,
     '어제 세금계산서 발행 방법을 물어보셨습니다.'
   ]);
   const service = new ChatService(repository, provider, 200000, registry);
@@ -508,7 +508,36 @@ test('the model can answer from a past conversation through the tool loop', asyn
 
   const calls = await db.query<{ tool_name: string; status: string }>('SELECT tool_name, status FROM chat_tool_calls ORDER BY created_at');
   assert.deepEqual(calls.rows, [
-    { tool_name: 'chat_search_history', status: 'succeeded' },
-    { tool_name: 'chat_read_conversation', status: 'succeeded' }
+    { tool_name: 'search_my_conversations', status: 'succeeded' },
+    { tool_name: 'get_conversation_context', status: 'succeeded' }
   ]);
+});
+
+test('search matches title and summary but deliberately not message bodies', async () => {
+  const repository = new ChatRepository(db);
+  // 제목은 첫 질문에서 만들어지므로, 본문에만 있는 낱말은 검색되지 않아야 한다.
+  const thread = await seedConversation(repository, USER_A, '취급고 알려줘', '취급고는 TSV_MT 에 월 단위로 쌓입니다.');
+  const current = await repository.createThread(USER_A);
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const context = { ownerUserId: USER_A, currentThreadId: current.id };
+
+  const byTitle = await registry.execute('search_my_conversations', { query: '취급고' }, context) as { conversations: Array<{ thread_id: string }> };
+  assert.deepEqual(byTitle.conversations.map((r) => r.thread_id), [thread]);
+
+  // architecture.md 5: 메시지 원문에는 인덱스를 만들지 않으므로 검색 대상이 아니다.
+  const byBody = await registry.execute('search_my_conversations', { query: 'TSV_MT' }, context) as { found: number };
+  assert.equal(byBody.found, 0);
+});
+
+test('search returns at most five conversations', async () => {
+  const repository = new ChatRepository(db);
+  for (let index = 0; index < 7; index += 1) {
+    await seedConversation(repository, USER_A, `질문 ${index}`, `답변 ${index}`);
+  }
+  const current = await repository.createThread(USER_A);
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const result = await registry.execute('search_my_conversations', {}, { ownerUserId: USER_A, currentThreadId: current.id }) as { found: number };
+  assert.equal(result.found, 5);
 });

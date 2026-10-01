@@ -50,39 +50,34 @@ export class ChatRepository {
   }
 
   /**
-   * Looks back over the owner's other conversations inside the retention window.
+   * Searches the owner's other conversations inside the retention window.
+   * Matches title and handoff_summary only: architecture.md 5 keeps message bodies
+   * out of the search index until real search logs justify one.
    * Scope comes from the server session, never from tool input.
    */
-  async searchHistory(ownerUserId: string, input: {
+  async searchMyConversations(ownerUserId: string, input: {
     query?: string;
     from?: string;
     to?: string;
     excludeThreadId?: string;
     limit: number;
-  }): Promise<Array<{ thread_id: string; title: string; created_at: string; last_activity_at: string; message_count: number; matches: Array<{ role: string; content: string; created_at: string }> }>> {
+  }): Promise<Array<{ thread_id: string; title: string; last_activity_at: string; summary_preview: string }>> {
     const pattern = input.query ? `%${input.query}%` : null;
-    return (await this.db.query<{ thread_id: string; title: string; created_at: string; last_activity_at: string; message_count: number; matches: Array<{ role: string; content: string; created_at: string }> }>(
-      `SELECT t.id AS thread_id, t.title, t.created_at, t.last_activity_at,
-              (SELECT COUNT(*)::int FROM chat_messages m WHERE m.thread_id=t.id) AS message_count,
-              COALESCE((
-                SELECT json_agg(json_build_object('role', x.role, 'content', left(x.content, 400), 'created_at', x.created_at) ORDER BY x.created_at)
-                FROM (
-                  SELECT m.role, m.content, m.created_at
-                  FROM chat_messages m
-                  WHERE m.thread_id=t.id AND ($2::text IS NULL OR m.content ILIKE $2)
-                  ORDER BY m.created_at
-                  LIMIT 4
-                ) x
-              ), '[]'::json) AS matches
+    return (await this.db.query<{ thread_id: string; title: string; last_activity_at: string; summary_preview: string }>(
+      `SELECT t.id AS thread_id, t.title, t.last_activity_at,
+              COALESCE(s.handoff_summary, '') AS summary_preview
        FROM chat_threads t
+       LEFT JOIN LATERAL (
+         SELECT handoff_summary FROM chat_context_segments
+         WHERE thread_id=t.id AND handoff_summary IS NOT NULL
+         ORDER BY segment_number DESC LIMIT 1
+       ) s ON true
        WHERE t.owner_user_id=$1
          AND t.created_at >= now() - interval '30 days'
          AND ($3::uuid IS NULL OR t.id <> $3::uuid)
          AND ($4::timestamptz IS NULL OR t.last_activity_at >= $4::timestamptz)
          AND ($5::timestamptz IS NULL OR t.last_activity_at < $5::timestamptz)
-         AND ($2::text IS NULL
-              OR t.title ILIKE $2
-              OR EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id=t.id AND m.content ILIKE $2))
+         AND ($2::text IS NULL OR t.title ILIKE $2 OR COALESCE(s.handoff_summary, '') ILIKE $2)
          AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id=t.id)
        ORDER BY t.last_activity_at DESC
        LIMIT $6`,
@@ -90,20 +85,37 @@ export class ChatRepository {
     )).rows;
   }
 
-  /** Reads one of the owner's past conversations in full, newest-last. */
-  async readConversation(ownerUserId: string, threadId: string, limit: number): Promise<{ title: string; created_at: string; messages: Array<{ role: string; content: string; created_at: string }> } | undefined> {
-    const thread = (await this.db.query<{ title: string; created_at: string }>(
-      `SELECT title, created_at FROM chat_threads
+  /** Pulls one past conversation into the current context: summary, entities, recent messages. */
+  async getConversationContext(ownerUserId: string, threadId: string, messageLimit: number): Promise<{
+    title: string;
+    last_activity_at: string;
+    handoff_summary: string | null;
+    referenced_entities: unknown[];
+    recent_messages: Array<{ role: string; content: string; created_at: string }>;
+  } | undefined> {
+    const thread = (await this.db.query<{ title: string; last_activity_at: string }>(
+      `SELECT title, last_activity_at FROM chat_threads
        WHERE id=$1 AND owner_user_id=$2 AND created_at >= now() - interval '30 days'`,
       [threadId, ownerUserId]
     )).rows[0];
     if (!thread) return undefined;
+    const segment = (await this.db.query<{ handoff_summary: string | null; referenced_entities: unknown[] }>(
+      `SELECT handoff_summary, referenced_entities FROM chat_context_segments
+       WHERE thread_id=$1 ORDER BY segment_number DESC LIMIT 1`,
+      [threadId]
+    )).rows[0];
     const messages = (await this.db.query<{ role: string; content: string; created_at: string }>(
       `SELECT role, content, created_at FROM chat_messages
        WHERE thread_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2`,
-      [threadId, limit]
+      [threadId, messageLimit]
     )).rows;
-    return { title: thread.title, created_at: thread.created_at, messages: messages.reverse() };
+    return {
+      title: thread.title,
+      last_activity_at: thread.last_activity_at,
+      handoff_summary: segment?.handoff_summary ?? null,
+      referenced_entities: segment?.referenced_entities ?? [],
+      recent_messages: messages.reverse()
+    };
   }
 
   async updateThreadStatus(ownerUserId: string, threadId: string, status: ThreadStatus): Promise<ChatThread | undefined> {
