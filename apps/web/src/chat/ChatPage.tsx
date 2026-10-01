@@ -20,11 +20,11 @@ export function ChatPage() {
       searching={chat.searching}
       searchResults={chat.searchResults}
       hasMore={chat.hasMore}
-      onNew={() => { void chat.createThread(); setSidebarOpen(false); }}
-      onLoadMore={() => void chat.loadMoreThreads()}
-      onSearch={(query) => void chat.searchThreads(query)}
+      onNew={() => { chat.startNewThread(); setSidebarOpen(false); }}
+      onLoadMore={chat.loadMoreThreads}
+      onSearch={chat.searchThreads}
       onSelect={(threadId) => { void chat.selectThread(threadId); setSidebarOpen(false); }}
-      onArchive={(threadId) => void chat.archiveThread(threadId)}
+      onDelete={chat.deleteThread}
     />
   );
 

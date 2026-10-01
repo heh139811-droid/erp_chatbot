@@ -44,28 +44,30 @@ export function useChat() {
     }
   }, []);
 
-  const createThread = useCallback(async () => {
+  /**
+   * Starts a new conversation locally only. The thread row is written on the first
+   * message (see `send`), so an abandoned "새 대화" never reaches the database.
+   */
+  const startNewThread = useCallback(() => {
+    abortRef.current?.abort();
+    setSelectedThreadId(undefined);
+    setMessages([]);
     setError(undefined);
-    try {
-      const thread = await api.createThread();
-      setThreads((current) => [thread, ...current]);
-      setSelectedThreadId(thread.id);
-      setMessages([]);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
   }, []);
 
-  const archiveThread = useCallback(async (threadId: string) => {
+  const deleteThread = useCallback(async (threadId: string) => {
     try {
-      await api.archiveThread(threadId);
+      if (selectedThreadId === threadId) abortRef.current?.abort();
+      await api.deleteThread(threadId);
       setThreads((current) => current.filter((thread) => thread.id !== threadId));
+      setSearchResults((current) => current.filter((thread) => thread.id !== threadId));
       if (selectedThreadId === threadId) {
         setSelectedThreadId(undefined);
         setMessages([]);
       }
     } catch (cause) {
       setError(messageOf(cause));
+      throw cause;
     }
   }, [selectedThreadId]);
 
@@ -84,28 +86,33 @@ export function useChat() {
     }
   }, []);
 
+  const loadMoreThreads = useCallback(() => loadThreads(false), [loadThreads]);
+
   const send = useCallback(async (content: string) => {
     if (streaming) return;
-    let threadId = selectedThreadId;
-    if (!threadId) {
-      const thread = await api.createThread();
-      threadId = thread.id;
-      setSelectedThreadId(thread.id);
-      setThreads((current) => [thread, ...current]);
-    }
+    const temporaryThreadId = selectedThreadId ?? `pending-thread-${crypto.randomUUID()}`;
     const optimisticUserId = `pending-user-${crypto.randomUUID()}`;
     const optimisticAssistantId = `pending-assistant-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     setMessages((current) => [
       ...current,
-      { id: optimisticUserId, thread_id: threadId, role: 'user', content, created_at: now, pending: true },
-      { id: optimisticAssistantId, thread_id: threadId, role: 'assistant', content: '', created_at: now, pending: true }
+      { id: optimisticUserId, thread_id: temporaryThreadId, role: 'user', content, created_at: now, pending: true },
+      { id: optimisticAssistantId, thread_id: temporaryThreadId, role: 'assistant', content: '', created_at: now, pending: true }
     ]);
     setStreaming(true);
     setError(undefined);
     const controller = new AbortController();
     abortRef.current = controller;
+    let createdThreadId: string | undefined;
     try {
+      let threadId = selectedThreadId;
+      if (!threadId) {
+        const thread = await api.createThread();
+        createdThreadId = thread.id;
+        threadId = thread.id;
+        setSelectedThreadId(thread.id);
+        setThreads((current) => [thread, ...current]);
+      }
       for await (const event of api.sendMessage(threadId, content, controller.signal)) {
         if (event.type === 'text_delta') {
           setMessages((current) => current.map((message) => message.id === optimisticAssistantId
@@ -121,6 +128,12 @@ export function useChat() {
       }
     } catch (cause) {
       setMessages((current) => current.filter((message) => message.id !== optimisticUserId && message.id !== optimisticAssistantId));
+      // The server drops a thread whose first answer never landed; mirror that here.
+      if (createdThreadId) {
+        const abandonedId = createdThreadId;
+        setThreads((current) => current.filter((thread) => thread.id !== abandonedId));
+        setSelectedThreadId((current) => current === abandonedId ? undefined : current);
+      }
       if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(messageOf(cause));
     } finally {
       setStreaming(false);
@@ -138,10 +151,10 @@ export function useChat() {
     error,
     searchResults,
     searching,
-    loadMoreThreads: () => loadThreads(false),
+    loadMoreThreads,
     selectThread,
-    createThread,
-    archiveThread,
+    startNewThread,
+    deleteThread,
     searchThreads,
     send
   };
