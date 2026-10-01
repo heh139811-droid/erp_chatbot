@@ -7,6 +7,7 @@ import type { Database } from '../src/core/types.js';
 import { ChatRepository } from '../src/modules/chat/repository.js';
 import { OUT_OF_SCOPE_REPLY, SYSTEM_PROMPT, buildModelMessages, buildSystemPrompt, parseToolCall } from '../src/modules/chat/context.js';
 import { ChatService } from '../src/modules/chat/service.js';
+import { registerHistoryTools } from '../src/modules/chat/history-tools.js';
 import { ToolRegistry } from '../src/modules/chat/tool-registry.js';
 import type { ChatModelProvider, ModelMessage, ProviderResult } from '../src/modules/chat/types.js';
 import { z } from 'zod';
@@ -311,7 +312,10 @@ test('reports an unknown tool back to the model instead of failing the run', asy
 });
 
 test('tool definitions reach the system prompt only when tools are registered', () => {
-  assert.equal(buildSystemPrompt([]), SYSTEM_PROMPT);
+  const bare = buildSystemPrompt([], new Date('2026-10-01T09:00:00'));
+  assert.ok(bare.startsWith(SYSTEM_PROMPT));
+  assert.match(bare, /오늘은 .*2026.*이다/);
+  assert.ok(!bare.includes('도구 사용 규칙'));
   const withTools = buildSystemPrompt([{ name: 'crm_query', description: '조회', capability: 'crm:read', input_schema: { type: 'object' } }]);
   assert.match(withTools, /crm_query/);
   assert.match(withTools, /도구 사용 규칙/);
@@ -400,4 +404,111 @@ test('keeps every message of a conversation still inside its retention window', 
 
   await repository.cleanupExpired();
   assert.equal((await db.query<{ c: number }>('SELECT COUNT(*)::int AS c FROM chat_messages WHERE thread_id=$1', [thread.id])).rows[0].c, 2);
+});
+
+/** Seeds one finished conversation and returns its thread id. */
+async function seedConversation(repository: ChatRepository, owner: string, question: string, answer: string): Promise<string> {
+  const thread = await repository.createThread(owner);
+  const segment = await repository.getOrCreateSegment(thread.id);
+  const runId = await repository.reserveRun(thread.id, segment.id, 'mock', 'mock-local');
+  await repository.completeRun({ ownerUserId: owner, threadId: thread.id, segmentId: segment.id, runId, question, answer });
+  return thread.id;
+}
+
+test('history search finds the owner past conversations and hides other users', async () => {
+  const repository = new ChatRepository(db);
+  const mine = await seedConversation(repository, USER_A, '계약 해지 절차 알려줘', '해지는 담당자 승인이 필요합니다.');
+  await seedConversation(repository, USER_B, '계약 해지 절차 알려줘', '다른 사용자의 대화입니다.');
+  const current = await repository.createThread(USER_A);
+
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const context = { ownerUserId: USER_A, currentThreadId: current.id };
+
+  const found = await registry.execute('chat_search_history', { query: '계약 해지' }, context) as {
+    found: number;
+    conversations: Array<{ thread_id: string }>;
+  };
+  assert.equal(found.found, 1);
+  assert.equal(found.conversations[0].thread_id, mine);
+
+  // USER_B 가 같은 도구를 써도 자기 대화만 보인다.
+  const theirs = await registry.execute('chat_search_history', { query: '계약 해지' }, { ownerUserId: USER_B, currentThreadId: current.id }) as { conversations: Array<{ thread_id: string }> };
+  assert.ok(!theirs.conversations.some((row) => row.thread_id === mine));
+});
+
+test('history search excludes the current conversation and anything past 30 days', async () => {
+  const repository = new ChatRepository(db);
+  const old = await seedConversation(repository, USER_A, '오래된 질문', '오래된 답변');
+  await db.query(`UPDATE chat_threads SET created_at=now() - interval '31 days' WHERE id=$1`, [old]);
+  const current = await seedConversation(repository, USER_A, '지금 질문', '지금 답변');
+
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const result = await registry.execute('chat_search_history', {}, { ownerUserId: USER_A, currentThreadId: current }) as {
+    conversations: Array<{ thread_id: string }>;
+  };
+  assert.deepEqual(result.conversations.map((row) => row.thread_id), []);
+});
+
+test('history search narrows by date range', async () => {
+  const repository = new ChatRepository(db);
+  const yesterday = await seedConversation(repository, USER_A, '어제 물어본 것', '어제 답변');
+  const today = await seedConversation(repository, USER_A, '오늘 물어본 것', '오늘 답변');
+  await db.query(`UPDATE chat_threads SET last_activity_at=now() - interval '1 day' WHERE id=$1`, [yesterday]);
+  const current = await repository.createThread(USER_A);
+
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const context = { ownerUserId: USER_A, currentThreadId: current.id };
+  const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+
+  const before = await registry.execute('chat_search_history', { to: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
+  assert.deepEqual(before.conversations.map((r) => r.thread_id), [yesterday]);
+  const after = await registry.execute('chat_search_history', { from: cutoff }, context) as { conversations: Array<{ thread_id: string }> };
+  assert.deepEqual(after.conversations.map((r) => r.thread_id), [today]);
+});
+
+test('reading a past conversation is refused for another user and for the current thread', async () => {
+  const repository = new ChatRepository(db);
+  const theirs = await seedConversation(repository, USER_B, '남의 대화', '남의 답변');
+  const mine = await seedConversation(repository, USER_A, '내 대화', '내 답변');
+  const current = await repository.createThread(USER_A);
+
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+  const context = { ownerUserId: USER_A, currentThreadId: current.id };
+
+  const read = await registry.execute('chat_read_conversation', { thread_id: mine }, context) as { messages: Array<{ role: string; content: string }> };
+  assert.deepEqual(read.messages.map((m) => m.content), ['내 대화', '내 답변']);
+
+  await assert.rejects(() => registry.execute('chat_read_conversation', { thread_id: theirs }, context), /찾을 수 없습니다/);
+  await assert.rejects(() => registry.execute('chat_read_conversation', { thread_id: current.id }, context), /진행 중인 대화/);
+});
+
+test('the model can answer from a past conversation through the tool loop', async () => {
+  const repository = new ChatRepository(db);
+  const past = await seedConversation(repository, USER_A, '어제 세금계산서 발행 방법 물어봤다', '세금계산서는 TAX_MT 에서 관리합니다.');
+  const current = await repository.createThread(USER_A);
+  const registry = new ToolRegistry();
+  registerHistoryTools(registry, repository);
+
+  const provider = new ScriptedProvider([
+    '<tool_call>{"name":"chat_search_history","input":{"query":"세금계산서"}}</tool_call>',
+    `<tool_call>{"name":"chat_read_conversation","input":{"thread_id":"${past}"}}</tool_call>`,
+    '어제 세금계산서 발행 방법을 물어보셨습니다.'
+  ]);
+  const service = new ChatService(repository, provider, 200000, registry);
+
+  let answer = '';
+  for await (const event of service.sendMessage({ ownerUserId: USER_A, threadId: current.id, question: '나 어제 뭐 물어봤지?', signal: new AbortController().signal })) {
+    if (event.type === 'text_delta') answer += event.delta;
+  }
+  assert.equal(answer, '어제 세금계산서 발행 방법을 물어보셨습니다.');
+
+  const calls = await db.query<{ tool_name: string; status: string }>('SELECT tool_name, status FROM chat_tool_calls ORDER BY created_at');
+  assert.deepEqual(calls.rows, [
+    { tool_name: 'chat_search_history', status: 'succeeded' },
+    { tool_name: 'chat_read_conversation', status: 'succeeded' }
+  ]);
 });

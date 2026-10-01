@@ -1,11 +1,21 @@
 import { z } from 'zod';
 
+/**
+ * Request scope handed to tools by the server. Never comes from model input:
+ * the spec forbids accepting a user id as a tool argument (FR 보안, spec.md).
+ */
+export interface ToolContext {
+  ownerUserId: string;
+  /** The conversation being answered. History tools exclude it so they only look back. */
+  currentThreadId: string;
+}
+
 export interface ToolDefinition<TInput, TResult> {
   name: string;
   description: string;
   capability: string;
   inputSchema: z.ZodType<TInput>;
-  handler: (input: TInput) => Promise<TResult>;
+  handler: (input: TInput, context: ToolContext) => Promise<TResult>;
 }
 
 /** What the model is told about a tool. Mirrors FR-10 step 2 of the spec. */
@@ -46,10 +56,10 @@ export class ToolRegistry {
     }));
   }
 
-  async execute(name: string, input: unknown): Promise<unknown> {
+  async execute(name: string, input: unknown, context: ToolContext): Promise<unknown> {
     const tool = this.tools.get(name);
     if (!tool) throw Object.assign(new Error(`Tool not allowed: ${name}`), { code: 'TOOL_NOT_ALLOWED' });
-    return tool.handler(tool.inputSchema.parse(input));
+    return tool.handler(tool.inputSchema.parse(input), context);
   }
 }
 

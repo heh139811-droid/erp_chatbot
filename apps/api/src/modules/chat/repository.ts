@@ -49,6 +49,63 @@ export class ChatRepository {
     };
   }
 
+  /**
+   * Looks back over the owner's other conversations inside the retention window.
+   * Scope comes from the server session, never from tool input.
+   */
+  async searchHistory(ownerUserId: string, input: {
+    query?: string;
+    from?: string;
+    to?: string;
+    excludeThreadId?: string;
+    limit: number;
+  }): Promise<Array<{ thread_id: string; title: string; created_at: string; last_activity_at: string; message_count: number; matches: Array<{ role: string; content: string; created_at: string }> }>> {
+    const pattern = input.query ? `%${input.query}%` : null;
+    return (await this.db.query<{ thread_id: string; title: string; created_at: string; last_activity_at: string; message_count: number; matches: Array<{ role: string; content: string; created_at: string }> }>(
+      `SELECT t.id AS thread_id, t.title, t.created_at, t.last_activity_at,
+              (SELECT COUNT(*)::int FROM chat_messages m WHERE m.thread_id=t.id) AS message_count,
+              COALESCE((
+                SELECT json_agg(json_build_object('role', x.role, 'content', left(x.content, 400), 'created_at', x.created_at) ORDER BY x.created_at)
+                FROM (
+                  SELECT m.role, m.content, m.created_at
+                  FROM chat_messages m
+                  WHERE m.thread_id=t.id AND ($2::text IS NULL OR m.content ILIKE $2)
+                  ORDER BY m.created_at
+                  LIMIT 4
+                ) x
+              ), '[]'::json) AS matches
+       FROM chat_threads t
+       WHERE t.owner_user_id=$1
+         AND t.created_at >= now() - interval '30 days'
+         AND ($3::uuid IS NULL OR t.id <> $3::uuid)
+         AND ($4::timestamptz IS NULL OR t.last_activity_at >= $4::timestamptz)
+         AND ($5::timestamptz IS NULL OR t.last_activity_at < $5::timestamptz)
+         AND ($2::text IS NULL
+              OR t.title ILIKE $2
+              OR EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id=t.id AND m.content ILIKE $2))
+         AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.thread_id=t.id)
+       ORDER BY t.last_activity_at DESC
+       LIMIT $6`,
+      [ownerUserId, pattern, input.excludeThreadId ?? null, input.from ?? null, input.to ?? null, input.limit]
+    )).rows;
+  }
+
+  /** Reads one of the owner's past conversations in full, newest-last. */
+  async readConversation(ownerUserId: string, threadId: string, limit: number): Promise<{ title: string; created_at: string; messages: Array<{ role: string; content: string; created_at: string }> } | undefined> {
+    const thread = (await this.db.query<{ title: string; created_at: string }>(
+      `SELECT title, created_at FROM chat_threads
+       WHERE id=$1 AND owner_user_id=$2 AND created_at >= now() - interval '30 days'`,
+      [threadId, ownerUserId]
+    )).rows[0];
+    if (!thread) return undefined;
+    const messages = (await this.db.query<{ role: string; content: string; created_at: string }>(
+      `SELECT role, content, created_at FROM chat_messages
+       WHERE thread_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2`,
+      [threadId, limit]
+    )).rows;
+    return { title: thread.title, created_at: thread.created_at, messages: messages.reverse() };
+  }
+
   async updateThreadStatus(ownerUserId: string, threadId: string, status: ThreadStatus): Promise<ChatThread | undefined> {
     return (await this.db.query<ChatThread>(
       `UPDATE chat_threads SET status=$3, updated_at=now() WHERE id=$1 AND owner_user_id=$2 RETURNING *`,

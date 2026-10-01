@@ -11,6 +11,7 @@ import { ClaudeCliProvider, MockChatProvider } from './modules/chat/provider.js'
 import { registerChatRoutes } from './modules/chat/routes.js';
 import { ChatService } from './modules/chat/service.js';
 import { ToolRegistry } from './modules/chat/tool-registry.js';
+import { registerHistoryTools } from './modules/chat/history-tools.js';
 import { registerCrmTools } from './modules/crm/tools.js';
 
 export async function createApp(config: AppConfig, db: Database, crmDb?: CrmDatabase) {
@@ -21,6 +22,7 @@ export async function createApp(config: AppConfig, db: Database, crmDb?: CrmData
     ? new ClaudeCliProvider(config.claudeModel, config.claudeCommand)
     : new MockChatProvider();
   const tools = new ToolRegistry();
+  registerHistoryTools(tools, repository);
   if (crmDb) registerCrmTools(tools, crmDb);
   const service = new ChatService(repository, provider, config.contextMaxTokens, tools);
   registerChatRoutes(app, { config, repository, service });

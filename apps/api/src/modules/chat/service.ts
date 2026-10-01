@@ -7,7 +7,7 @@ import {
   renderToolResult
 } from './context.js';
 import { ChatRepository } from './repository.js';
-import { ToolRegistry } from './tool-registry.js';
+import { ToolRegistry, type ToolContext } from './tool-registry.js';
 import type { ChatModelProvider, ModelMessage, NewAnswerBasis, ProviderResult, StreamEvent } from './types.js';
 
 /** How many tool hops one question may take before the model must answer with what it has. */
@@ -88,7 +88,7 @@ export class ChatService {
         }
 
         conversation.push({ role: 'assistant', content: buffered.trim() });
-        const outcome = await this.invokeTool(runId, call.name, call.input);
+        const outcome = await this.invokeTool(runId, call.name, call.input, { ownerUserId: input.ownerUserId, currentThreadId: thread.id });
         conversation.push({ role: 'user', content: outcome.rendered });
         if (outcome.basis) answerBasis.push(outcome.basis);
       }
@@ -132,7 +132,7 @@ export class ChatService {
   }
 
   /** Runs one tool and turns both success and failure into something the model can read. */
-  private async invokeTool(runId: string, name: string, input: unknown): Promise<{ rendered: string; basis?: NewAnswerBasis }> {
+  private async invokeTool(runId: string, name: string, input: unknown, context: ToolContext): Promise<{ rendered: string; basis?: NewAnswerBasis }> {
     const startedAt = Date.now();
     if (!this.tools.has(name)) {
       await this.repository.recordToolCall({
@@ -141,7 +141,7 @@ export class ChatService {
       return { rendered: renderToolError(name, `허용되지 않은 도구입니다: ${name}`) };
     }
     try {
-      const result = await this.tools.execute(name, input);
+      const result = await this.tools.execute(name, input, context);
       const rowCount = readRowCount(result);
       await this.repository.recordToolCall({
         runId, toolName: name, status: 'succeeded', resultCount: rowCount, durationMs: Date.now() - startedAt
@@ -168,7 +168,7 @@ function withFinalAnswerNudge(systemPrompt: string): string {
 function readRowCount(result: unknown): number | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
-  for (const key of ['row_count', 'table_count']) {
+  for (const key of ['row_count', 'table_count', 'found', 'message_count']) {
     if (typeof record[key] === 'number') return record[key] as number;
   }
   return Array.isArray(record.columns) ? record.columns.length : undefined;
