@@ -18,13 +18,23 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
     viewport.addEventListener('scroll', update, { passive: true });
     return () => viewport.removeEventListener('scroll', update);
   }, []);
+  const previousCountRef = useRef(messages.length);
   useEffect(() => {
+    const grew = messages.length > previousCountRef.current;
+    previousCountRef.current = messages.length;
+    if (grew) {
+      // Sending is an explicit request to watch the answer, so follow it even when the reader scrolled away.
+      nearBottomRef.current = true;
+      endRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+      return;
+    }
+    // Streaming deltas only follow a reader who stayed at the bottom.
     if (nearBottomRef.current) endRef.current?.scrollIntoView({ block: 'end' });
   }, [messages]);
 
   return (
     <ScrollArea ref={scrollRootRef} className="min-h-0 flex-1">
-      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-6 md:px-6 md:py-10">
+      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col py-6 md:py-10">
         {messages.length === 0 ? (
           <div className="m-auto flex max-w-lg flex-col items-center py-16 text-center">
             <div className="mb-5 grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-sm"><Sparkles className="size-5" /></div>
@@ -33,7 +43,7 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
             <p className="mt-3 text-sm leading-6 text-muted-foreground">사내 ERP 업무와 데이터에 관해 질문해 주세요. 본인의 대화만 안전하게 저장됩니다.</p>
           </div>
         ) : (
-          <div className="space-y-7">
+          <div className="space-y-9">
             {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
           </div>
         )}
