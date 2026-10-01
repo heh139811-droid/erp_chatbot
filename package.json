@@ -3,8 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=22.0.0" },
-  "workspaces": ["apps/*"],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
     "dev": "node --env-file-if-exists=.env.local --import tsx apps/api/src/server.ts",
     "dev:web": "npm run dev --workspace @erp-chatbot/web",
@@ -19,6 +23,7 @@
     "@electric-sql/pglite": "^0.3.14",
     "@fastify/cors": "^11.1.0",
     "fastify": "^5.6.0",
+    "mysql2": "^3.24.5",
     "pg": "^8.16.3",
     "zod": "^4.1.0"
   },
