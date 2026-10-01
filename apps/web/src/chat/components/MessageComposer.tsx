@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react';
+import { useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, LoaderCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -12,6 +12,7 @@ interface Props {
 
 export function MessageComposer({ disabled, onSend }: Props) {
   const [value, setValue] = useState('');
+  const submittedOnKeyDownRef = useRef(false);
   const submit = async () => {
     const content = value.trim();
     if (!content || disabled) return;
@@ -19,10 +20,20 @@ export function MessageComposer({ disabled, onSend }: Props) {
     await onSend(content);
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      void submit();
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    submittedOnKeyDownRef.current = false;
+    if (event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    submittedOnKeyDownRef.current = true;
+    void submit();
+  };
+  const handleKeyUp = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    if (submittedOnKeyDownRef.current) {
+      submittedOnKeyDownRef.current = false;
+      return;
     }
+    if (!event.nativeEvent.isComposing) void submit();
   };
   return (
     <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-2 md:px-6 md:pb-5">
@@ -32,6 +43,7 @@ export function MessageComposer({ disabled, onSend }: Props) {
             value={value}
             onChange={(event) => setValue(event.target.value)}
             onKeyDown={handleKeyDown}
+            onKeyUp={handleKeyUp}
             disabled={disabled}
             rows={1}
             maxLength={20_000}
